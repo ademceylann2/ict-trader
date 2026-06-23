@@ -27,8 +27,8 @@ SKIP_KZ_GLOBAL    = {"ny_close"}
 INDEX_SYMBOLS     = {"ES=F", "NQ=F"}
 SKIP_KZ_FOR_INDEX = {"asia", "ny_close", "new_york"}  # sadece london aktif
 
-# Crypto için minimum ★5 (BTC ★5=%100, ★4=%0)
-CRYPTO_SYMBOLS    = {"BTC-USD", "ETH-USD"}
+# Crypto için minimum ★5
+CRYPTO_SYMBOLS    = {"ETH-USD"}
 CRYPTO_MIN_STARS  = 5
 
 # SMT Divergence korelasyon çiftleri
@@ -40,9 +40,6 @@ SMT_PAIRS = {
     "ETH-USD":  "BTC-USD",
     "GC=F":     "SI=F",    # Altın vs Gümüş SMT
 }
-
-# Crypto için minimum ★5 — ETH için geçerli
-CRYPTO_SYMBOLS = {"ETH-USD"}
 
 
 def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
