@@ -1,13 +1,18 @@
 """
-ICT Analyzer v5 — Inner Circle Trader TAM metodoloji (YouTube 2024 Mentorship).
+ICT Analyzer v8 — Inner Circle Trader TAM metodoloji (2017/2022/2024 Mentorship).
 
 Kavramlar:
   Temel: BOS/CHOCH/MSS, FVG (BISI/SIBI), IFVG, Order Blocks, Breaker Blocks
   Modeller: Unicorn, OTE (62-79%), Silver Bullet, MMXM, AMD/Power of 3
-  Zaman: Kill Zones, ICT Macros (8 pencere), NDOG, NWOG
+  Zaman: Kill Zones, ICT Macros (8 pencere), NDOG, NWOG, Asian Range (19-00 NY)
   Gelişmiş: SMT Divergence, IPDA, Judas Swing, Quarterly Theory,
              Displacement, Session Sweep, Turtle Soup, CRT,
-             Weekly Profiles, Inducement (IDM), Consequent Encroachment
+             Weekly Profiles, Inducement (IDM), Consequent Encroachment,
+             BPR, Volume Imbalance, Rejection Block, Propulsion Block,
+             Mitigation Block, Vacuum Block, Psychological Levels
+  v8 Yeni: CISD (Change in State of Delivery), HRLR/LRLR (Liquidity Run),
+            MMBM/MMSM (Market Maker Buy/Sell Model — 4 faz),
+            STH/ITH/LTH + STL/ITL/LTL (Swing Hierarchy)
 """
 
 import pandas as pd
@@ -1153,6 +1158,290 @@ class ICTAnalyzer:
                 "current": current, "pct_from_eq": round((current-eq)/eq*100, 2)}
 
     # ══════════════════════════════════════════════════════════════════════
+    # CISD — Change in State of Delivery (ICT 2022 Mentorship)
+    # Body close above open of opposing leg = earliest reversal signal
+    # Fires BEFORE MSS/CHoCH — use on 5m/15m after HTF PD Array tap
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_cisd(self, df: pd.DataFrame, bias: str) -> dict:
+        """
+        Bullish CISD: body closes above the open of the last bearish (down) leg.
+        Bearish CISD: body closes below the open of the last bullish (up) leg.
+        Body-only rule — wicks are ignored.
+        """
+        if len(df) < 6:
+            return {"found": False}
+
+        closes = df["Close"].values
+        opens  = df["Open"].values
+
+        # Find last opposing leg then check if body closed past its open
+        if bias in ("BULLISH", "CHOCH_BULLISH"):
+            # Look for last bearish leg (series of down closes)
+            for i in range(len(df) - 3, 1, -1):
+                if opens[i] > closes[i]:   # bearish candle — opposing leg
+                    opposing_open = opens[i]
+                    # Check if any subsequent candle body closed above opposing open
+                    for j in range(i + 1, len(df)):
+                        body_close = closes[j]
+                        body_open  = opens[j]
+                        # Body close must be above opposing_open (body only)
+                        if body_close > opposing_open and body_open < body_close:
+                            return {
+                                "found": True, "direction": "BULLISH",
+                                "cisd_level": opposing_open,
+                                "confirmed_at": j,
+                                "desc": f"Bullish CISD: body close {round(body_close,4)} > bear open {round(opposing_open,4)}"
+                            }
+                    break
+
+        elif bias in ("BEARISH", "CHOCH_BEARISH"):
+            for i in range(len(df) - 3, 1, -1):
+                if opens[i] < closes[i]:   # bullish candle — opposing leg
+                    opposing_open = opens[i]
+                    for j in range(i + 1, len(df)):
+                        body_close = closes[j]
+                        body_open  = opens[j]
+                        if body_close < opposing_open and body_open > body_close:
+                            return {
+                                "found": True, "direction": "BEARISH",
+                                "cisd_level": opposing_open,
+                                "confirmed_at": j,
+                                "desc": f"Bearish CISD: body close {round(body_close,4)} < bull open {round(opposing_open,4)}"
+                            }
+                    break
+
+        return {"found": False}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # HRLR / LRLR — High/Low Resistance Liquidity Run (ICT 2017)
+    # Classify if the path to target is clear or blocked by swing obstacles
+    # LRLR = clean acceleration (FVGs left behind, no opposing swings in path)
+    # HRLR = multiple swing obstacles block path (needs news catalyst)
+    # ══════════════════════════════════════════════════════════════════════
+    def classify_liquidity_run(self, df: pd.DataFrame, target_level: float,
+                               direction: str) -> dict:
+        """
+        Count swing highs/lows between current price and target.
+        LRLR (0-1 obstacles) → high probability TP, enter aggressively.
+        HRLR (2+ obstacles)  → stretch target, wait for news catalyst.
+        """
+        if len(df) < 10:
+            return {"type": "UNKNOWN", "obstacles": 0}
+
+        current = df["Close"].iloc[-1]
+        sh, sl  = self._swing_points(df, strength=1)   # smaller strength = more swings
+
+        obstacles = 0
+        if direction == "BULLISH":
+            # Count swing highs between current and target
+            obstacles = sum(1 for _, h in sh if current < h < target_level)
+        else:
+            # Count swing lows between target and current
+            obstacles = sum(1 for _, l in sl if target_level < l < current)
+
+        run_type = "LRLR" if obstacles <= 1 else "HRLR"
+        return {
+            "type": run_type,
+            "obstacles": obstacles,
+            "desc": (f"LRLR: chıkan yol açık ({obstacles} engel)"
+                     if run_type == "LRLR"
+                     else f"HRLR: {obstacles} swing engeli — haber gününü bekle"),
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # MMBM / MMSM — Market Maker Buy/Sell Model (ICT 2022)
+    # 4 phases: Original Consolidation → Engineering Liquidity →
+    #           Smart Money Reversal → Liquidity Hunt
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_mm_model_phase(self, df_htf: pd.DataFrame, df_mtf: pd.DataFrame,
+                              bias: str) -> dict:
+        """
+        Detects which phase of the Market Maker model price is in.
+        Phase 3 (Smart Money Reversal after MSS + SMT) = entry phase.
+        """
+        if len(df_htf) < 20 or len(df_mtf) < 10:
+            return {"phase": "UNKNOWN", "model": "NONE"}
+
+        current    = df_mtf["Close"].iloc[-1]
+        atr_series = (df_htf["High"] - df_htf["Low"]).rolling(14).mean()
+        if atr_series.empty or pd.isna(atr_series.iloc[-1]):
+            return {"phase": "UNKNOWN", "model": "NONE"}
+        atr = atr_series.iloc[-1]
+
+        # Phase 1 — Consolidation: tight range, recent range < 1.5x ATR
+        recent_range = df_htf["High"].tail(10).max() - df_htf["Low"].tail(10).min()
+        in_consol    = recent_range < atr * 1.5
+
+        # Phase 2 — Engineering Liquidity: EQH or EQL present (Turtle Soup setup)
+        turtle = self.detect_turtle_soup(df_mtf)
+        in_engineering = turtle.get("found", False)
+
+        # Phase 3 — Smart Money Reversal: MSS after sweep
+        sess_sweep = self.detect_session_sweep(df_mtf)
+        disp       = self.detect_displacement(df_mtf)
+        ms         = self.detect_market_structure(df_mtf)
+        in_reversal = (
+            sess_sweep.get("sweep") and
+            disp.get("found") and
+            "CHOCH" in ms
+        )
+
+        # Phase 4 — Liquidity Hunt: strong trending with FVGs
+        fvgs = self.find_fvg_classified(df_mtf)
+        in_hunt = len(fvgs) >= 2 and not in_consol
+
+        if in_reversal:
+            model = "MMBM" if bias in ("BULLISH","CHOCH_BULLISH") else "MMSM"
+            return {
+                "phase": "SMART_MONEY_REVERSAL",
+                "model": model,
+                "desc":  f"{model} Faz 3: MSS+Sweep+Displacement onayı → entry!",
+                "entry_ready": True,
+            }
+        if in_engineering:
+            return {
+                "phase": "ENGINEERING_LIQUIDITY",
+                "model": "MMBM" if bias in ("BULLISH","CHOCH_BULLISH") else "MMSM",
+                "desc":  "Faz 2: Retail tuzağı kurulyor (EQH/EQL) — bekle",
+                "entry_ready": False,
+            }
+        if in_consol:
+            return {"phase": "ORIGINAL_CONSOLIDATION", "model": "NONE",
+                    "desc": "Faz 1: Konsolidasyon — hareket bekleniyor", "entry_ready": False}
+        if in_hunt:
+            return {"phase": "LIQUIDITY_HUNT", "model": "NONE",
+                    "desc": "Faz 4: Likidite avı devam ediyor", "entry_ready": False}
+
+        return {"phase": "UNKNOWN", "model": "NONE", "entry_ready": False}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ASIAN RANGE — 19:00-00:00 NY (ICT 2022)
+    # High/low of this session = tomorrow's liquidity sweep targets
+    # London & NY sessions typically raid Asian high or low first
+    # ══════════════════════════════════════════════════════════════════════
+    def find_asian_range(self, df: pd.DataFrame) -> dict:
+        """
+        Asian session 19:00-00:00 NY. High = BSL target, Low = SSL target.
+        When price sweeps Asian High → bearish, Asian Low → bullish.
+        """
+        if len(df) < 12:
+            return {}
+
+        df_et = df.copy()
+        try:
+            df_et.index = pd.to_datetime(df_et.index, utc=True).tz_convert(self._et)
+        except Exception:
+            return {}
+
+        today = df_et.index[-1].date()
+        # Asian range is prior session: 19:00 yesterday to 00:00 today
+        asian = df_et[
+            (
+                (df_et.index.hour >= 19) &
+                (df_et.index.date < today)   # yesterday's evening
+            ) | (
+                (df_et.index.hour == 0) &
+                (df_et.index.date == today)  # midnight candle
+            )
+        ]
+
+        if len(asian) < 3:
+            return {}
+
+        asian_high = asian["High"].max()
+        asian_low  = asian["Low"].min()
+        current    = df["Close"].iloc[-1]
+        last3_high = df["High"].iloc[-3:].max()
+        last3_low  = df["Low"].iloc[-3:].min()
+
+        swept_high = last3_high > asian_high and current < asian_high
+        swept_low  = last3_low  < asian_low  and current > asian_low
+
+        return {
+            "high":        asian_high,
+            "low":         asian_low,
+            "midpoint":    (asian_high + asian_low) / 2,
+            "swept_high":  swept_high,
+            "swept_low":   swept_low,
+            "direction":   ("BEARISH" if swept_high else "BULLISH" if swept_low else "NONE"),
+            "desc": (
+                f"Asian High Sweep → bear ({round(asian_high,4)})" if swept_high else
+                f"Asian Low Sweep → bull ({round(asian_low,4)})"   if swept_low  else
+                f"Asian Range: {round(asian_low,4)}-{round(asian_high,4)}"
+            ),
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STH / ITH / LTH — Swing Hierarchy (ICT Advanced Market Structure)
+    # STH = 3-candle swing high (higher than both neighbors)
+    # ITH = STH with lower STHs on each side
+    # LTH = ITH with lower ITHs on each side
+    # ══════════════════════════════════════════════════════════════════════
+    def classify_swing_hierarchy(self, df: pd.DataFrame) -> dict:
+        """
+        Returns labeled swing highs and lows sorted by significance.
+        Use LTH/LTL as trend anchors, ITH/ITL as active structure,
+        STH/STL as intraday entry zones.
+        """
+        if len(df) < 15:
+            return {"sth": [], "ith": [], "lth": [], "stl": [], "itl": [], "ltl": []}
+
+        highs = df["High"].values
+        lows  = df["Low"].values
+        n     = len(df)
+
+        # Detect raw STH/STL (3-candle swing)
+        sth_idx, stl_idx = [], []
+        for i in range(1, n - 1):
+            if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+                sth_idx.append(i)
+            if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+                stl_idx.append(i)
+
+        # ITH: STH with lower STHs on each side
+        ith_idx = []
+        for k, i in enumerate(sth_idx):
+            left  = [j for j in sth_idx[:k]  if highs[j] < highs[i]]
+            right = [j for j in sth_idx[k+1:] if highs[j] < highs[i]]
+            if left and right:
+                ith_idx.append(i)
+
+        # LTH: ITH with lower ITHs on each side
+        lth_idx = []
+        for k, i in enumerate(ith_idx):
+            left  = [j for j in ith_idx[:k]  if highs[j] < highs[i]]
+            right = [j for j in ith_idx[k+1:] if highs[j] < highs[i]]
+            if left and right:
+                lth_idx.append(i)
+
+        # ITL / LTL (mirror for lows)
+        itl_idx = []
+        for k, i in enumerate(stl_idx):
+            left  = [j for j in stl_idx[:k]  if lows[j] > lows[i]]
+            right = [j for j in stl_idx[k+1:] if lows[j] > lows[i]]
+            if left and right:
+                itl_idx.append(i)
+
+        ltl_idx = []
+        for k, i in enumerate(itl_idx):
+            left  = [j for j in itl_idx[:k]  if lows[j] > lows[i]]
+            right = [j for j in itl_idx[k+1:] if lows[j] > lows[i]]
+            if left and right:
+                ltl_idx.append(i)
+
+        def to_list(idx_list, arr):
+            return [{"index": i, "price": arr[i], "time": df.index[i]} for i in idx_list]
+
+        return {
+            "sth": to_list(sth_idx, highs),
+            "ith": to_list(ith_idx, highs),
+            "lth": to_list(lth_idx, highs),
+            "stl": to_list(stl_idx, lows),
+            "itl": to_list(itl_idx, lows),
+            "ltl": to_list(ltl_idx, lows),
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
     # ANA SİNYAL ÜRETİCİ — ICT v3 tam metodoloji
     # ══════════════════════════════════════════════════════════════════════
     def generate_signal(self, df_htf: pd.DataFrame, df_mtf: pd.DataFrame,
@@ -1206,6 +1495,12 @@ class ICTAnalyzer:
         inducement   = self.detect_inducement(df_mtf, bias)
         venom        = self.detect_venom_setup(df_mtf) if self.symbol in ("NQ=F","ES=F") else {"found": False}
 
+        # Yeni ICT kavramları (v8)
+        cisd         = self.detect_cisd(df_mtf, bias)
+        mm_phase     = self.detect_mm_model_phase(df_htf, df_mtf, bias)
+        asian_range  = self.find_asian_range(df_mtf)
+        swing_hier   = self.classify_swing_hierarchy(df_htf)
+
         # NDOG/NWOG seviyeleri
         opening_gaps = self.find_opening_gaps(df_htf) if len(df_htf) >= 48 else {}
 
@@ -1255,6 +1550,30 @@ class ICTAnalyzer:
             base.append(f"Venom: {venom['desc']}")
         if first_fvg:
             base.append(f"1st FVG ({first_fvg['label']}): {round(first_fvg['bottom'],4)}-{round(first_fvg['top'],4)}")
+        # CISD — erken dönüş sinyali
+        if cisd.get("found"):
+            base.append(f"CISD: {cisd['desc']}")
+        # MMBM/MMSM faz
+        if mm_phase.get("phase") == "SMART_MONEY_REVERSAL":
+            base.append(f"★ {mm_phase['desc']}")
+        elif mm_phase.get("phase") not in ("UNKNOWN", "NONE"):
+            base.append(f"MM Model Faz: {mm_phase['desc']}")
+        # Asian Range sweep
+        if asian_range.get("direction") not in (None, "NONE", ""):
+            base.append(f"Asian Range: {asian_range['desc']}")
+        # STH/ITH/LTH yakın seviyeler
+        lths = swing_hier.get("lth", [])
+        ltls = swing_hier.get("ltl", [])
+        iths = swing_hier.get("ith", [])
+        itls = swing_hier.get("itl", [])
+        if lths:
+            nearest_lth = min(lths, key=lambda x: abs(x["price"] - current))
+            if abs(nearest_lth["price"] - current) / current < 0.005:
+                base.append(f"LTH Yakın: {round(nearest_lth['price'],4)}")
+        if ltls:
+            nearest_ltl = min(ltls, key=lambda x: abs(x["price"] - current))
+            if abs(nearest_ltl["price"] - current) / current < 0.005:
+                base.append(f"LTL Yakın: {round(nearest_ltl['price'],4)}")
         base.append(f"Hafta: {weekly_prof['day']} ({weekly_prof['bias']})")
 
         # NDOG seviyeleri yakınsa ekle
@@ -1458,6 +1777,43 @@ class ICTAnalyzer:
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası long ✓")
 
+                # CISD bullish onay (+1 yıldız — erken dönüş teyidi)
+                if cisd.get("found") and cisd.get("direction") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"CISD Bullish ✓ {cisd['desc']}")
+
+                # MMBM Faz 3 onayı (+1 yıldız)
+                if mm_phase.get("phase") == "SMART_MONEY_REVERSAL" and \
+                   mm_phase.get("model") == "MMBM":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"MMBM Faz 3: Smart Money Reversal ✓")
+
+                # Asian Low sweep → bullish (+1 yıldız + TP güncelle)
+                if asian_range.get("swept_low"):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Asian Low Sweep bullish ✓ ({round(asian_range['low'],4)})")
+                    if asian_range.get("high", 0) > current:
+                        tp2 = asian_range["high"]
+                        confs.append(f"Asian Range hedef: {round(tp2,4)}")
+
+                # LRLR — temiz yol bonus (+1 yıldız)
+                if tp_list:
+                    lrlr = self.classify_liquidity_run(df_htf, tp1, "BULLISH")
+                    if lrlr["type"] == "LRLR":
+                        stars = min(stars + 1, 5)
+                        confs.append(f"LRLR: Temiz yol → TP ({lrlr['obstacles']} engel)")
+                    elif lrlr["type"] == "HRLR":
+                        confs.append(f"HRLR: {lrlr['obstacles']} engel — haber gününü tercih et")
+
+                # ITH/LTH yakın → güçlü direnç (TP hedefi)
+                if iths:
+                    ith_targets = [x["price"] for x in iths if x["price"] > current]
+                    if ith_targets:
+                        nearest_ith_tp = min(ith_targets)
+                        if nearest_ith_tp < tp2:
+                            tp1 = min(tp1, nearest_ith_tp)
+                            confs.append(f"ITH hedef: {round(nearest_ith_tp,4)}")
+
                 # Q3 uyarısı
                 if q3_warning:
                     confs.append("⚠️ Q3 — düşük güven sezonu, pozisyon küçük tut")
@@ -1649,6 +2005,43 @@ class ICTAnalyzer:
                 if inducement.get("found") and inducement.get("direction") == "BEARISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası short ✓")
+
+                # CISD bearish onay (+1 yıldız)
+                if cisd.get("found") and cisd.get("direction") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"CISD Bearish ✓ {cisd['desc']}")
+
+                # MMSM Faz 3 onayı (+1 yıldız)
+                if mm_phase.get("phase") == "SMART_MONEY_REVERSAL" and \
+                   mm_phase.get("model") == "MMSM":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"MMSM Faz 3: Smart Money Reversal ✓")
+
+                # Asian High sweep → bearish (+1 yıldız + TP güncelle)
+                if asian_range.get("swept_high"):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Asian High Sweep bearish ✓ ({round(asian_range['high'],4)})")
+                    if asian_range.get("low", float("inf")) < current:
+                        tp2 = asian_range["low"]
+                        confs.append(f"Asian Range hedef: {round(tp2,4)}")
+
+                # LRLR — temiz yol bonus (+1 yıldız)
+                if tp_list:
+                    lrlr = self.classify_liquidity_run(df_htf, tp1, "BEARISH")
+                    if lrlr["type"] == "LRLR":
+                        stars = min(stars + 1, 5)
+                        confs.append(f"LRLR: Temiz yol → TP ({lrlr['obstacles']} engel)")
+                    elif lrlr["type"] == "HRLR":
+                        confs.append(f"HRLR: {lrlr['obstacles']} engel — haber gününü tercih et")
+
+                # ITL/LTL yakın → güçlü destek (TP hedefi)
+                if itls:
+                    itl_targets = [x["price"] for x in itls if x["price"] < current]
+                    if itl_targets:
+                        nearest_itl_tp = max(itl_targets)
+                        if nearest_itl_tp > tp2:
+                            tp1 = max(tp1, nearest_itl_tp)
+                            confs.append(f"ITL hedef: {round(nearest_itl_tp,4)}")
 
                 if q3_warning:
                     confs.append("⚠️ Q3 — düşük güven sezonu, pozisyon küçük tut")
