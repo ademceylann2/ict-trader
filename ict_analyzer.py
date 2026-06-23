@@ -365,13 +365,21 @@ class ICTAnalyzer:
     # ══════════════════════════════════════════════════════════════════════
     # BISI / SIBI — FVG yön sınıflandırması (ICT 2024)
     # BISI = Up-closed FVG (bullish), SIBI = Down-closed FVG (bearish)
+    # IOFED = Candle 3's boundary — earliest/tightest entry (best R:R)
+    # CE    = 50% midpoint — second pyramid add
+    # Far Edge = Candle 1's boundary — full fill (last resort)
     # ══════════════════════════════════════════════════════════════════════
     def find_fvg_classified(self, df: pd.DataFrame, min_size_pct: float = 0.0005) -> list:
-        """find_fvg'yi BISI/SIBI etiketiyle zenginleştirir."""
+        """find_fvg'yi BISI/SIBI + IOFED etiketiyle zenginleştirir."""
         fvgs = self.find_fvg(df, min_size_pct)
         for f in fvgs:
             f["label"] = "BISI" if f["type"] == "BULLISH_FVG" else "SIBI"
-            f["consequent_encroachment"] = f["midpoint"]
+            f["consequent_encroachment"] = f["midpoint"]   # CE = 50%
+            # IOFED: entry at candle-3 boundary (tightest entry, best R:R)
+            if f["type"] == "BULLISH_FVG":
+                f["iofed"] = f["top"]      # top = c3l, enter from above into FVG
+            else:
+                f["iofed"] = f["bottom"]   # bottom = c3h, enter from below into FVG
         return fvgs
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1851,7 +1859,7 @@ class ICTAnalyzer:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BULLISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
                         entry_zone, setup_name, model_name = fvg, f"Bullish BISI", "OB_FVG"
-                        confs.append(f"BISI CE: {round(fvg['midpoint'],4)}")
+                        confs.append(f"BISI IOFED: {round(fvg.get('iofed',fvg['top']),4)} | CE: {round(fvg['midpoint'],4)}")
                         break
 
             # 10. Order Block ★★
@@ -2111,7 +2119,7 @@ class ICTAnalyzer:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BEARISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
                         entry_zone, setup_name, model_name = fvg, "Bearish SIBI", "OB_FVG"
-                        confs.append(f"SIBI CE: {round(fvg['midpoint'],4)}")
+                        confs.append(f"SIBI IOFED: {round(fvg.get('iofed',fvg['bottom']),4)} | CE: {round(fvg['midpoint'],4)}")
                         break
 
             # 10. Order Block ★★
