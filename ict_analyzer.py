@@ -237,7 +237,9 @@ class ICTAnalyzer:
         return unicorns
 
     # ══════════════════════════════════════════════════════════════════════
-    # OTE — Optimal Trade Entry (%62-%79 Fibonacci)
+    # OTE — Optimal Trade Entry (ICT Fibonacci: 62-79%, sweet spot 70.5%)
+    # Extensions: -0.27 = TP1, -0.62 = TP2 (beyond swing)
+    # Rule: price MUST first cross 50% equilibrium before OTE is valid
     # ══════════════════════════════════════════════════════════════════════
     def find_ote(self, df: pd.DataFrame, bias: str) -> Optional[dict]:
         sh, sl = self._swing_points(df)
@@ -246,19 +248,40 @@ class ICTAnalyzer:
         if bias in ("BULLISH", "CHOCH_BULLISH"):
             lo, hi = sl[-1][1], sh[-1][1]
             if hi <= lo: return None
-            return {"direction": "BULLISH",
-                    "top":    lo + 0.79*(hi-lo),
-                    "bottom": lo + 0.62*(hi-lo),
-                    "fib_50": lo + 0.50*(hi-lo),
-                    "swing_low": lo, "swing_high": hi}
+            rng = hi - lo
+            eq  = lo + 0.50 * rng
+            # Must have crossed below equilibrium (50%) to be valid OTE
+            if df["Close"].iloc[-1] > eq:
+                return None   # Not in discount — OTE not valid yet
+            return {
+                "direction":   "BULLISH",
+                "top":         lo + 0.79 * rng,
+                "bottom":      lo + 0.62 * rng,
+                "sweet_spot":  lo + 0.705 * rng,   # ICT 70.5% precision level
+                "fib_50":      eq,
+                "tp1_ext":     hi + 0.27 * rng,    # -0.27 extension target
+                "tp2_ext":     hi + 0.62 * rng,    # -0.62 extension target
+                "swing_low":   lo,
+                "swing_high":  hi,
+            }
         elif bias in ("BEARISH", "CHOCH_BEARISH"):
             hi, lo = sh[-1][1], sl[-1][1]
             if lo >= hi: return None
-            return {"direction": "BEARISH",
-                    "bottom": hi - 0.79*(hi-lo),
-                    "top":    hi - 0.62*(hi-lo),
-                    "fib_50": hi - 0.50*(hi-lo),
-                    "swing_high": hi, "swing_low": lo}
+            rng = hi - lo
+            eq  = hi - 0.50 * rng
+            if df["Close"].iloc[-1] < eq:
+                return None   # Not in premium — OTE not valid yet
+            return {
+                "direction":   "BEARISH",
+                "bottom":      hi - 0.79 * rng,
+                "top":         hi - 0.62 * rng,
+                "sweet_spot":  hi - 0.705 * rng,
+                "fib_50":      eq,
+                "tp1_ext":     lo - 0.27 * rng,    # -0.27 extension target
+                "tp2_ext":     lo - 0.62 * rng,    # -0.62 extension target
+                "swing_high":  hi,
+                "swing_low":   lo,
+            }
         return None
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1778,7 +1801,14 @@ class ICTAnalyzer:
                 if ote["bottom"] <= current <= ote["top"]:
                     entry_zone, setup_name, model_name, stars = \
                         ote, "OTE 62-79% Fib", "OTE", 4
-                    confs.append(f"OTE: {round(ote['bottom'],4)}-{round(ote['top'],4)}")
+                    confs.append(f"OTE: {round(ote['bottom'],4)}-{round(ote['top'],4)} | 70.5%={round(ote['sweet_spot'],4)}")
+                    # Use Fibonacci extension as TP
+                    if ote.get("tp1_ext"):
+                        tp1 = ote["tp1_ext"]
+                        confs.append(f"OTE -0.27 ext TP1: {round(tp1,4)}")
+                    if ote.get("tp2_ext"):
+                        tp2 = ote["tp2_ext"]
+                        confs.append(f"OTE -0.62 ext TP2: {round(tp2,4)}")
 
             # 5. IFVG ★★★
             if not entry_zone:
@@ -2032,7 +2062,13 @@ class ICTAnalyzer:
                 if ote["bottom"] <= current <= ote["top"]:
                     entry_zone, setup_name, model_name, stars = \
                         ote, "OTE 62-79% Fib", "OTE", 4
-                    confs.append(f"OTE: {round(ote['bottom'],4)}-{round(ote['top'],4)}")
+                    confs.append(f"OTE: {round(ote['bottom'],4)}-{round(ote['top'],4)} | 70.5%={round(ote['sweet_spot'],4)}")
+                    if ote.get("tp1_ext"):
+                        tp1 = ote["tp1_ext"]
+                        confs.append(f"OTE -0.27 ext TP1: {round(tp1,4)}")
+                    if ote.get("tp2_ext"):
+                        tp2 = ote["tp2_ext"]
+                        confs.append(f"OTE -0.62 ext TP2: {round(tp2,4)}")
 
             # 5. IFVG ★★★
             if not entry_zone:
