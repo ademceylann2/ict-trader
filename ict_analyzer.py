@@ -551,7 +551,7 @@ class ICTAnalyzer:
                 reward = tp1 - current
                 rr     = round(reward / risk, 2) if risk > 0 else 0
 
-                if rr >= 2.0 and stars >= 2:
+                if rr >= 2.0 and rr <= 15.0 and stars >= 4:
                     return Signal(
                         symbol=self.symbol, direction="LONG",
                         entry=round(current,5), sl=round(sl,5),
@@ -651,7 +651,7 @@ class ICTAnalyzer:
                 reward = current - tp1
                 rr     = round(reward / risk, 2) if risk > 0 else 0
 
-                if rr >= 2.0 and stars >= 2:
+                if rr >= 2.0 and rr <= 15.0 and stars >= 4:
                     return Signal(
                         symbol=self.symbol, direction="SHORT",
                         entry=round(current,5), sl=round(sl,5),

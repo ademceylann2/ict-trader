@@ -16,6 +16,18 @@ from notifier import send_signal, send_news_alert, send_startup_message
 SCAN_INTERVAL = 300
 sent_signals  = set()
 
+# ── Backtest filtreleri ──────────────────────────────────────────────────────
+# NY Close tüm sembollerde %0 win rate → tamamen kapat
+SKIP_KZ_GLOBAL    = {"ny_close"}
+
+# Endeksler (ES/NQ) için sadece London çalışıyor
+INDEX_SYMBOLS     = {"ES=F", "NQ=F"}
+SKIP_KZ_FOR_INDEX = {"asia", "ny_close", "new_york"}  # sadece london aktif
+
+# Crypto için minimum ★5 (BTC ★5=%100, ★4=%0)
+CRYPTO_SYMBOLS    = {"BTC-USD", "ETH-USD"}
+CRYPTO_MIN_STARS  = 5
+
 # SMT Divergence korelasyon çiftleri
 SMT_PAIRS = {
     "EURUSD=X": "GBPUSD=X",
@@ -37,6 +49,16 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
         print(f"  [{symbol}] Veri alınamadı, atlanıyor.")
         return
 
+    # NY Close tüm sembollerde kötü → global filtre
+    if kill_zone in SKIP_KZ_GLOBAL:
+        print(f"  [{symbol}] ny_close atlanıyor (backtest: %0 win rate)")
+        return
+
+    # Endeksler sadece London'da iyi
+    if symbol in INDEX_SYMBOLS and kill_zone in SKIP_KZ_FOR_INDEX:
+        print(f"  [{symbol}] {kill_zone} endeks için atlanıyor (backtest filtresi)")
+        return
+
     # SMT için korelasyonlu çift
     df_corr = None
     corr_sym = SMT_PAIRS.get(symbol)
@@ -52,6 +74,16 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
     )
 
     if signal:
+        # Crypto için minimum ★5 filtresi (backtest: ★4=%0, ★5=%100)
+        if symbol in CRYPTO_SYMBOLS and signal.confidence < CRYPTO_MIN_STARS:
+            print(f"  [{symbol}] {signal.model} ★{signal.confidence} crypto min altında, atlanıyor")
+            return
+
+        # OB_FVG tek başına asla gönderme — UNICORN veya Silver Bullet olmalı
+        if signal.model == "OB_FVG" and signal.confidence < 5:
+            print(f"  [{symbol}] OB_FVG ★{signal.confidence} yeterli değil, atlanıyor")
+            return
+
         sig_key = f"{signal.symbol}_{signal.direction}_{signal.entry}"
         if sig_key not in sent_signals:
             stars = "★" * signal.confidence + "☆" * (5 - signal.confidence)
