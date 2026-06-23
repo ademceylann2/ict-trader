@@ -121,27 +121,58 @@ class ICTAnalyzer:
     # ══════════════════════════════════════════════════════════════════════
     # FAIR VALUE GAP (FVG) — 3 mumlu imbalance
     # ══════════════════════════════════════════════════════════════════════
-    def find_fvg(self, df: pd.DataFrame, min_size_pct: float = 0.0005) -> list:
+    def find_fvg(self, df: pd.DataFrame, min_size_pct: float = 0.0005,
+                 filter_mitigated: bool = True) -> list:
+        """
+        3-candle imbalance FVG detection.
+        filter_mitigated=True: exclude FVGs where price closed past CE (50%).
+        Once CE is closed through, FVG is mitigated and no longer an entry zone.
+        A wick touch is not enough — body/close past CE = mitigated.
+        """
         fvgs = []
         current = df["Close"].iloc[-1]
-        for i in range(1, len(df) - 1):
+        closes = df["Close"].values
+        n = len(df)
+
+        # Only scan the last 100 candles for FVG formation — older ones are stale.
+        # filter_mitigated checks the 40 candles *after* formation, not the full history.
+        start_i = max(1, n - 100)
+
+        for i in range(start_i, n - 1):
             c1h = df["High"].iloc[i-1]
             c1l = df["Low"].iloc[i-1]
             c3h = df["High"].iloc[i+1]
             c3l = df["Low"].iloc[i+1]
+
             # Bullish FVG
             if c1h < c3l:
                 size = c3l - c1h
+                mid  = (c3l + c1h) / 2
                 if size / current >= min_size_pct and current < c3l:
+                    if filter_mitigated:
+                        # Mitigated = close went below the FVG BOTTOM (c1h) within 40 candles.
+                        # Exclude the very last candle — it may be the active entry candle.
+                        window_end = min(i + 2 + 40, n - 1)
+                        mitigated = any(closes[j] < c1h for j in range(i + 2, window_end))
+                        if mitigated:
+                            continue
                     fvgs.append({"type": "BULLISH_FVG", "top": c3l, "bottom": c1h,
-                                 "midpoint": (c3l+c1h)/2, "size": size,
+                                 "midpoint": mid, "size": size,
                                  "index": i, "time": df.index[i]})
+
             # Bearish FVG
             if c1l > c3h:
                 size = c1l - c3h
+                mid  = (c1l + c3h) / 2
                 if size / current >= min_size_pct and current > c3h:
+                    if filter_mitigated:
+                        # Mitigated = close went above the FVG TOP (c1l) within 40 candles.
+                        window_end = min(i + 2 + 40, n - 1)
+                        mitigated = any(closes[j] > c1l for j in range(i + 2, window_end))
+                        if mitigated:
+                            continue
                     fvgs.append({"type": "BEARISH_FVG", "top": c1l, "bottom": c3h,
-                                 "midpoint": (c1l+c3h)/2, "size": size,
+                                 "midpoint": mid, "size": size,
                                  "index": i, "time": df.index[i]})
         return fvgs
 

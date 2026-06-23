@@ -11,13 +11,9 @@ SYMBOLS = {
     "indices": ["ES=F", "NQ=F"],  # S&P500 ve Nasdaq futures
 }
 
-# ICT Kill Zones (UTC saat)
-KILL_ZONES = {
-    "asia":       {"start": "00:00", "end": "03:00"},
-    "london":     {"start": "07:00", "end": "10:00"},
-    "new_york":   {"start": "12:00", "end": "15:00"},
-    "ny_close":   {"start": "19:00", "end": "20:00"},
-}
+# ICT Kill Zones — DO NOT USE: market_data.py handles these in ET (DST-aware)
+# Asia:     19:00-22:00 ET | London:  02:00-05:00 ET
+# New York: 07:00-10:00 ET | NY Close: 14:00-16:00 ET
 
 # Timeframe'ler (yfinance formatı)
 TIMEFRAMES = {
