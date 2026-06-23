@@ -1303,6 +1303,132 @@ class ICTAnalyzer:
         return vacuums
 
     # ══════════════════════════════════════════════════════════════════════
+    # DOL — Draw on Liquidity (ICT 2022/2024 core concept)
+    # The specific price level the market is targeting next.
+    # Selection: compare today's close vs yesterday's → DOL = prev day H or L
+    # PDH/PDL are the most common intraday DOL targets.
+    # ══════════════════════════════════════════════════════════════════════
+    def find_draw_on_liquidity(self, df_daily: pd.DataFrame, df_htf: pd.DataFrame) -> dict:
+        """
+        DOL rules (ICT 2022):
+        - Daily close > prev day close → DOL = prev day HIGH (BSL target)
+        - Daily close < prev day close → DOL = prev day LOW  (SSL target)
+        - Daily closes inside prev daily range → anticipate opposite DOL
+        Also marks PDH, PDL, PWH, PWL (Previous Week High/Low) as levels.
+        """
+        if df_daily is None or len(df_daily) < 3:
+            return {}
+
+        today_close = df_daily["Close"].iloc[-1]
+        prev_close  = df_daily["Close"].iloc[-2]
+        pdh         = df_daily["High"].iloc[-2]   # Previous Day High
+        pdl         = df_daily["Low"].iloc[-2]    # Previous Day Low
+        current     = df_htf["Close"].iloc[-1] if not df_htf.empty else today_close
+
+        # Inside bar check
+        prev_high = df_daily["High"].iloc[-2]
+        prev_low  = df_daily["Low"].iloc[-2]
+        today_high = df_daily["High"].iloc[-1]
+        today_low  = df_daily["Low"].iloc[-1]
+        inside_bar = today_high <= prev_high and today_low >= prev_low
+
+        if today_close > prev_close:
+            dol_level   = pdh
+            dol_dir     = "BULLISH"
+            dol_type    = "PDH"
+            dol_desc    = f"DOL → PDH {round(pdh,4)} (günlük kapanış yukarı)"
+        elif today_close < prev_close:
+            dol_level   = pdl
+            dol_dir     = "BEARISH"
+            dol_type    = "PDL"
+            dol_desc    = f"DOL → PDL {round(pdl,4)} (günlük kapanış aşağı)"
+        else:
+            dol_level   = pdh if current > (pdh + pdl) / 2 else pdl
+            dol_dir     = "BULLISH" if current > (pdh + pdl) / 2 else "BEARISH"
+            dol_type    = "PDH" if dol_dir == "BULLISH" else "PDL"
+            dol_desc    = f"DOL → {dol_type} {round(dol_level,4)} (inside bar)"
+
+        # Weekly high/low (last 5 days)
+        pwh = df_daily["High"].tail(5).max()
+        pwl = df_daily["Low"].tail(5).min()
+
+        return {
+            "dol_level":  dol_level,
+            "dol_dir":    dol_dir,
+            "dol_type":   dol_type,
+            "dol_desc":   dol_desc,
+            "pdh":        pdh,
+            "pdl":        pdl,
+            "pwh":        pwh,
+            "pwl":        pwl,
+            "inside_bar": inside_bar,
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # RDRB — Redelivered Rebalanced Price Range (ICT hidden PD Array)
+    # Two consecutive candles: deliver → wick pullback → redeliver same dir
+    # Wick = rebalancing zone. If price returns → strong reaction.
+    # ══════════════════════════════════════════════════════════════════════
+    def find_rdrb(self, df: pd.DataFrame, min_size_pct: float = 0.0003) -> list:
+        """
+        RDRB: Candle N delivers up, candle N+1 wicks down then closes up
+        (or mirror for bearish). The wick = rebalanced zone.
+        Similar to Rejection Block but requires consecutive delivery direction.
+        """
+        if len(df) < 3:
+            return []
+
+        rdrbs   = []
+        current = df["Close"].iloc[-1]
+
+        for i in range(1, len(df) - 1):
+            c1 = df.iloc[i-1]
+            c2 = df.iloc[i]
+
+            c1_bull = c1["Close"] > c1["Open"]
+            c2_bull = c2["Close"] > c2["Open"]
+            c1_bear = not c1_bull
+            c2_bear = not c2_bull
+
+            # Bullish RDRB: both candles up, c2 has significant lower wick
+            if c1_bull and c2_bull:
+                c2_body   = c2["Close"] - c2["Open"]
+                c2_wick   = c2["Open"] - c2["Low"]
+                if c2_body > 0 and c2_wick / c2_body >= 0.5:
+                    # Wick = rebalancing zone (c2 Low to c2 Open)
+                    top    = c2["Open"]
+                    bottom = c2["Low"]
+                    size   = top - bottom
+                    if size / current >= min_size_pct and current < top:
+                        rdrbs.append({
+                            "type":     "BULLISH_RDRB",
+                            "top":      top,
+                            "bottom":   bottom,
+                            "midpoint": (top + bottom) / 2,
+                            "index":    i,
+                            "time":     df.index[i],
+                        })
+
+            # Bearish RDRB: both candles down, c2 has significant upper wick
+            elif c1_bear and c2_bear:
+                c2_body = c2["Open"] - c2["Close"]
+                c2_wick = c2["High"] - c2["Open"]
+                if c2_body > 0 and c2_wick / c2_body >= 0.5:
+                    top    = c2["High"]
+                    bottom = c2["Open"]
+                    size   = top - bottom
+                    if size / current >= min_size_pct and current > bottom:
+                        rdrbs.append({
+                            "type":     "BEARISH_RDRB",
+                            "top":      top,
+                            "bottom":   bottom,
+                            "midpoint": (top + bottom) / 2,
+                            "index":    i,
+                            "time":     df.index[i],
+                        })
+        return rdrbs
+
+    # ══════════════════════════════════════════════════════════════════════
     # PSYCHOLOGICAL LEVELS — Yuvarlak sayılar (ICT 2017 + Filling Numbers)
     # Altın için: $3300, $3350, $3400 gibi seviyeleri yakala
     # ══════════════════════════════════════════════════════════════════════
@@ -1770,6 +1896,7 @@ class ICTAnalyzer:
         fvgs       = self.find_fvg_classified(df_mtf)
         ifvgs      = self.find_ifvg(df_mtf)
         impl_fvgs  = self.find_implied_fvg(df_mtf)
+        rdrbs      = self.find_rdrb(df_mtf)
         obs        = self.find_order_blocks(df_mtf)
         breakers  = self.find_breaker_blocks(df_mtf)
         unicorns  = self.find_unicorn(df_mtf)
@@ -1805,6 +1932,7 @@ class ICTAnalyzer:
         midnight_ref  = self.find_midnight_open(df_htf)
         weekly_ref    = self.find_weekly_open(df_htf)
         intraday_prof = self.detect_intraday_profile(df_htf)
+        dol           = self.find_draw_on_liquidity(df_daily, df_htf) if df_daily is not None and not df_daily.empty else {}
 
         # NDOG/NWOG seviyeleri
         opening_gaps = self.find_opening_gaps(df_htf) if len(df_htf) >= 48 else {}
@@ -1918,6 +2046,12 @@ class ICTAnalyzer:
             if abs(current - v) / current < 0.003:
                 base.append(f"IPDA {k}: {round(v,4)}")
 
+        # DOL — Likidite hedefi
+        if dol.get("dol_desc"):
+            base.append(f"DOL: {dol['dol_desc']}")
+        if dol.get("inside_bar"):
+            base.append("Inside Bar: düşük volatilite — kırılış bekle")
+
         # ══════════════ LONG KURULUMU ════════════════════════════════════
         if bias in ("BULLISH", "CHOCH_BULLISH") and pd_zone["zone"] == "DISCOUNT":
             confs = base.copy()
@@ -2023,6 +2157,15 @@ class ICTAnalyzer:
                         confs.append(f"Propulsion Block: midpoint {round(p['midpoint'],4)}")
                         break
 
+            # 8b. RDRB ★★★ (Redelivered Rebalanced Price Range)
+            if not entry_zone:
+                for r in reversed(rdrbs):
+                    if r["type"] == "BULLISH_RDRB" and r["bottom"] <= current <= r["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            r, "Bullish RDRB", "OB_FVG", 3
+                        confs.append(f"RDRB Bullish: rebalans bölgesi {round(r['bottom'],4)}-{round(r['top'],4)}")
+                        break
+
             # 9. FVG (BISI) ★★
             if not entry_zone:
                 for fvg in reversed(fvgs):
@@ -2078,6 +2221,14 @@ class ICTAnalyzer:
                 if midnight_ref.get("judas_dir") == "BULLISH" and midnight_ref.get("mr_high", 0) > current:
                     tp1 = midnight_ref["mr_high"]
                     confs.append(f"2022 MR High hedef: {round(tp1,4)}")
+
+                # DOL (Draw on Liquidity) bullish — PDH hedef
+                if dol.get("dol_dir") == "BULLISH" and dol.get("pdh", 0) > current:
+                    tp1 = dol["pdh"]
+                    confs.append(f"DOL Bullish: PDH {round(dol['pdh'],4)} hedef ✓")
+                    stars = min(stars + 1, 5)
+                elif dol.get("pwh", 0) > current:
+                    confs.append(f"PWH hedef: {round(dol['pwh'],4)}")
 
                 # ICT Macro penceresi bonus
                 if macro_win:
@@ -2298,6 +2449,15 @@ class ICTAnalyzer:
                         confs.append(f"Propulsion Block: midpoint {round(p['midpoint'],4)}")
                         break
 
+            # 8b. RDRB ★★★
+            if not entry_zone:
+                for r in reversed(rdrbs):
+                    if r["type"] == "BEARISH_RDRB" and r["bottom"] <= current <= r["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            r, "Bearish RDRB", "OB_FVG", 3
+                        confs.append(f"RDRB Bearish: rebalans bölgesi {round(r['bottom'],4)}-{round(r['top'],4)}")
+                        break
+
             # 9. FVG (SIBI) ★★
             if not entry_zone:
                 for fvg in reversed(fvgs):
@@ -2351,6 +2511,14 @@ class ICTAnalyzer:
                 if midnight_ref.get("judas_dir") == "BEARISH" and midnight_ref.get("mr_low", float("inf")) < current:
                     tp1 = midnight_ref["mr_low"]
                     confs.append(f"2022 MR Low hedef: {round(tp1,4)}")
+
+                # DOL (Draw on Liquidity) bearish — PDL hedef
+                if dol.get("dol_dir") == "BEARISH" and dol.get("pdl", float("inf")) < current:
+                    tp1 = dol["pdl"]
+                    confs.append(f"DOL Bearish: PDL {round(dol['pdl'],4)} hedef ✓")
+                    stars = min(stars + 1, 5)
+                elif dol.get("pwl", float("inf")) < current:
+                    confs.append(f"PWL hedef: {round(dol['pwl'],4)}")
 
                 # ICT Macro penceresi bonus
                 if macro_win:
