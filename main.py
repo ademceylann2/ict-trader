@@ -14,6 +14,7 @@ from news_monitor import NewsMonitor
 from notifier import send_signal, send_news_alert, send_startup_message
 from executor import execute_signal as alpaca_execute, get_account_info as alpaca_account, ALPACA_API_KEY
 from executor_oanda import execute_signal as oanda_execute, get_account_info as oanda_account, OANDA_TOKEN
+from executor_capital import execute_signal as capital_execute, get_account_info as capital_account, CAPITAL_API_KEY
 
 SCAN_INTERVAL = 300
 sent_signals  = set()
@@ -91,8 +92,10 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
             stars = "★" * signal.confidence + "☆" * (5 - signal.confidence)
             print(f"  [{symbol}] ✅ {signal.model} {signal.direction} @ {signal.entry} [{stars}]")
             send_signal(signal)
-            # Broker entegrasyonu — OANDA öncelikli, yoksa Alpaca
-            if OANDA_TOKEN:
+            # Broker — Capital.com > OANDA > Alpaca
+            if CAPITAL_API_KEY:
+                capital_execute(signal)
+            elif OANDA_TOKEN:
                 oanda_execute(signal)
             elif ALPACA_API_KEY:
                 alpaca_execute(signal)
@@ -113,11 +116,18 @@ def main():
         SYMBOLS["forex"] + SYMBOLS["crypto"] + SYMBOLS["indices"]
     )
 
-    # Broker bağlantı kontrolü
-    if OANDA_TOKEN:
+    # Broker bağlantı kontrolü — Capital > OANDA > Alpaca
+    if CAPITAL_API_KEY:
+        try:
+            acc = capital_account()
+            mode = "DEMO" if True else "LIVE"
+            print(f"  Capital.com {mode} | Bakiye: ${float(acc['balance']):.2f}")
+        except Exception as e:
+            print(f"  Capital.com bağlantı hatası: {e}")
+    elif OANDA_TOKEN:
         try:
             acc = oanda_account()
-            print(f"  OANDA DEMO | Bakiye: ${acc['balance']:.2f} | Açık: {acc['open_trades']}")
+            print(f"  OANDA DEMO | Bakiye: ${acc['balance']:.2f}")
         except Exception as e:
             print(f"  OANDA bağlantı hatası: {e}")
     elif ALPACA_API_KEY:
