@@ -79,19 +79,23 @@ class ICTAnalyzer:
         return sh, sl
 
     # ══════════════════════════════════════════════════════════════════════
-    # POWER OF 3 / AMD — Accumulation, Manipulation, Distribution
+    # POWER OF 3 / AMD — Accumulation, Manipulation, Distribution (ICT 2024)
+    # Exact ET time windows per ICT 2024 material:
+    # Accumulation: 19:00-01:00 ET (Asia builds positions in tight range)
+    # Manipulation: 01:00-07:00 ET (London false breakout, Judas Swing)
+    # Distribution: 07:00-13:00 ET (NY delivers real direction)
     # ══════════════════════════════════════════════════════════════════════
     def detect_amd_phase(self, df_1h: pd.DataFrame) -> str:
         """
-        Asia (00-07 UTC) = Accumulation
-        London (07-12 UTC) = Manipulation (Judas Swing)
-        New York (12-21 UTC) = Distribution (gerçek hareket)
+        ICT Power of 3 (AMD) — exact ET session windows:
+        Asia   19:00-01:00 ET = Accumulation (tight range, build positions)
+        London 01:00-07:00 ET = Manipulation (Judas Swing, retail traps)
+        NY     07:00-13:00 ET = Distribution (real institutional direction)
         """
-        now_utc = datetime.utcnow()
-        h = now_utc.hour
-        if 0 <= h < 7:    return "ACCUMULATION"   # Asia
-        elif 7 <= h < 12: return "MANIPULATION"   # London açılış
-        elif 12 <= h < 21: return "DISTRIBUTION"  # New York
+        h = datetime.now(self._et).hour
+        if h >= 19 or h < 1:   return "ACCUMULATION"   # Asia
+        elif 1 <= h < 7:       return "MANIPULATION"   # London
+        elif 7 <= h < 13:      return "DISTRIBUTION"   # New York AM
         return "CONSOLIDATION"
 
     # ══════════════════════════════════════════════════════════════════════
@@ -170,6 +174,68 @@ class ICTAnalyzer:
                                   "original_fvg": fvg, "broken_at": j})
                     break
         return ifvgs
+
+    # ══════════════════════════════════════════════════════════════════════
+    # IMPLIED FVG — Hidden gap between wick midpoints (ICT 2024)
+    # Large displacement candle whose body is overlapped by neighbor wicks.
+    # Bullish: (c1_wick_50% of upper, c3_wick_50% of lower) = hidden support
+    # Bearish: (c1_wick_50% of lower, c3_wick_50% of upper) = hidden resistance
+    # Different from Inversion FVG — this was NEVER visible as a gap.
+    # ══════════════════════════════════════════════════════════════════════
+    def find_implied_fvg(self, df: pd.DataFrame, min_size_pct: float = 0.0003) -> list:
+        """
+        Implied FVG: hidden support/resistance between wick 50% levels.
+        Requires a large-bodied middle candle whose body is partially or
+        fully overlapped by the wicks of both surrounding candles.
+        """
+        if len(df) < 3:
+            return []
+
+        implied = []
+        current  = df["Close"].iloc[-1]
+        atr_body = (df["Close"] - df["Open"]).abs().rolling(14).mean()
+
+        for i in range(1, len(df) - 1):
+            c1 = df.iloc[i-1]
+            c2 = df.iloc[i]
+            c3 = df.iloc[i+1]
+
+            c2_body = abs(c2["Close"] - c2["Open"])
+            if atr_body.iloc[i] <= 0 or c2_body < atr_body.iloc[i] * 1.2:
+                continue   # c2 must be a displacement (larger than avg body)
+
+            # Bullish Implied FVG: c2 is a big up candle
+            if c2["Close"] > c2["Open"]:
+                # c1 and c3 wicks overlap c2's body
+                c1_upper_wick_50 = (c1["High"] + max(c1["Open"], c1["Close"])) / 2
+                c3_lower_wick_50 = (c3["Low"]  + min(c3["Open"], c3["Close"])) / 2
+                if c3_lower_wick_50 > c1_upper_wick_50:
+                    size = c3_lower_wick_50 - c1_upper_wick_50
+                    if size / current >= min_size_pct and current < c3_lower_wick_50:
+                        implied.append({
+                            "type":     "BULLISH_IMPLIED_FVG",
+                            "top":      c3_lower_wick_50,
+                            "bottom":   c1_upper_wick_50,
+                            "midpoint": (c3_lower_wick_50 + c1_upper_wick_50) / 2,
+                            "index":    i,
+                            "time":     df.index[i],
+                        })
+            # Bearish Implied FVG: c2 is a big down candle
+            elif c2["Close"] < c2["Open"]:
+                c1_lower_wick_50 = (c1["Low"]  + min(c1["Open"], c1["Close"])) / 2
+                c3_upper_wick_50 = (c3["High"] + max(c3["Open"], c3["Close"])) / 2
+                if c1_lower_wick_50 > c3_upper_wick_50:
+                    size = c1_lower_wick_50 - c3_upper_wick_50
+                    if size / current >= min_size_pct and current > c3_upper_wick_50:
+                        implied.append({
+                            "type":     "BEARISH_IMPLIED_FVG",
+                            "top":      c1_lower_wick_50,
+                            "bottom":   c3_upper_wick_50,
+                            "midpoint": (c1_lower_wick_50 + c3_upper_wick_50) / 2,
+                            "index":    i,
+                            "time":     df.index[i],
+                        })
+        return implied
 
     # ══════════════════════════════════════════════════════════════════════
     # ORDER BLOCKS
@@ -1611,9 +1677,10 @@ class ICTAnalyzer:
         current   = df_mtf["Close"].iloc[-1]
 
         # MTF analiz setleri — BISI/SIBI etiketli FVG (BUG FIX)
-        fvgs      = self.find_fvg_classified(df_mtf)
-        ifvgs     = self.find_ifvg(df_mtf)
-        obs       = self.find_order_blocks(df_mtf)
+        fvgs       = self.find_fvg_classified(df_mtf)
+        ifvgs      = self.find_ifvg(df_mtf)
+        impl_fvgs  = self.find_implied_fvg(df_mtf)
+        obs        = self.find_order_blocks(df_mtf)
         breakers  = self.find_breaker_blocks(df_mtf)
         unicorns  = self.find_unicorn(df_mtf)
         ote       = self.find_ote(df_htf, bias)
@@ -1818,13 +1885,22 @@ class ICTAnalyzer:
                         tp2 = ote["tp2_ext"]
                         confs.append(f"OTE -0.62 ext TP2: {round(tp2,4)}")
 
-            # 5. IFVG ★★★
+            # 5. IFVG (Inversion FVG) ★★★
             if not entry_zone:
                 for ifvg in reversed(ifvgs):
                     if ifvg["type"] == "BULLISH_IFVG" and ifvg["bottom"] <= current <= ifvg["top"]:
                         entry_zone, setup_name, model_name, stars = \
                             ifvg, "Bullish IFVG", "OB_FVG", 3
                         confs.append("Bullish IFVG (Ters FVG destek)")
+                        break
+
+            # 5b. Implied FVG ★★★ (hidden wick-midpoint gap)
+            if not entry_zone:
+                for imp in reversed(impl_fvgs):
+                    if imp["type"] == "BULLISH_IMPLIED_FVG" and imp["bottom"] <= current <= imp["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            imp, "Bullish Implied FVG", "OB_FVG", 3
+                        confs.append(f"Bullish Implied FVG (gizli gap): {round(imp['bottom'],4)}-{round(imp['top'],4)}")
                         break
 
             # 6. Bullish Breaker ★★★
@@ -2078,13 +2154,22 @@ class ICTAnalyzer:
                         tp2 = ote["tp2_ext"]
                         confs.append(f"OTE -0.62 ext TP2: {round(tp2,4)}")
 
-            # 5. IFVG ★★★
+            # 5. IFVG (Inversion FVG) ★★★
             if not entry_zone:
                 for ifvg in reversed(ifvgs):
                     if ifvg["type"] == "BEARISH_IFVG" and ifvg["bottom"] <= current <= ifvg["top"]:
                         entry_zone, setup_name, model_name, stars = \
                             ifvg, "Bearish IFVG", "OB_FVG", 3
                         confs.append("Bearish IFVG (Ters FVG direnç)")
+                        break
+
+            # 5b. Implied FVG ★★★
+            if not entry_zone:
+                for imp in reversed(impl_fvgs):
+                    if imp["type"] == "BEARISH_IMPLIED_FVG" and imp["bottom"] <= current <= imp["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            imp, "Bearish Implied FVG", "OB_FVG", 3
+                        confs.append(f"Bearish Implied FVG (gizli gap): {round(imp['bottom'],4)}-{round(imp['top'],4)}")
                         break
 
             # 6. Bearish Breaker ★★★
