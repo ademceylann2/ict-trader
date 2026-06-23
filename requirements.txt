@@ -1,5 +1,6 @@
 requests==2.32.5
 alpaca-py>=0.40.0
+oandapyV20>=0.7.2
 beautifulsoup4==4.15.0
 yfinance==1.2.0
 python-telegram-bot==22.5

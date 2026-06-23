@@ -12,7 +12,8 @@ from market_data import MarketData
 from ict_analyzer import ICTAnalyzer
 from news_monitor import NewsMonitor
 from notifier import send_signal, send_news_alert, send_startup_message
-from executor import execute_signal, get_account_info, ALPACA_API_KEY
+from executor import execute_signal as alpaca_execute, get_account_info as alpaca_account, ALPACA_API_KEY
+from executor_oanda import execute_signal as oanda_execute, get_account_info as oanda_account, OANDA_TOKEN
 
 SCAN_INTERVAL = 300
 sent_signals  = set()
@@ -90,9 +91,11 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
             stars = "★" * signal.confidence + "☆" * (5 - signal.confidence)
             print(f"  [{symbol}] ✅ {signal.model} {signal.direction} @ {signal.entry} [{stars}]")
             send_signal(signal)
-            # Alpaca entegrasyonu aktifse otomatik emir gönder
-            if ALPACA_API_KEY:
-                execute_signal(signal)
+            # Broker entegrasyonu — OANDA öncelikli, yoksa Alpaca
+            if OANDA_TOKEN:
+                oanda_execute(signal)
+            elif ALPACA_API_KEY:
+                alpaca_execute(signal)
             sent_signals.add(sig_key)
     else:
         print(f"  [{symbol}] Kurulum yok.")
@@ -110,11 +113,17 @@ def main():
         SYMBOLS["forex"] + SYMBOLS["crypto"] + SYMBOLS["indices"]
     )
 
-    # Alpaca hesap bilgisi
-    if ALPACA_API_KEY:
+    # Broker bağlantı kontrolü
+    if OANDA_TOKEN:
         try:
-            acc = get_account_info()
-            print(f"  Alpaca {('PAPER' if True else 'LIVE')} | Sermaye: ${acc['equity']:.2f}")
+            acc = oanda_account()
+            print(f"  OANDA DEMO | Bakiye: ${acc['balance']:.2f} | Açık: {acc['open_trades']}")
+        except Exception as e:
+            print(f"  OANDA bağlantı hatası: {e}")
+    elif ALPACA_API_KEY:
+        try:
+            acc = alpaca_account()
+            print(f"  Alpaca PAPER | Sermaye: ${acc['equity']:.2f}")
         except Exception as e:
             print(f"  Alpaca bağlantı hatası: {e}")
 
