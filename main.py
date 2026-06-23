@@ -12,6 +12,7 @@ from market_data import MarketData
 from ict_analyzer import ICTAnalyzer
 from news_monitor import NewsMonitor
 from notifier import send_signal, send_news_alert, send_startup_message
+from executor import execute_signal, get_account_info, ALPACA_API_KEY
 
 SCAN_INTERVAL = 300
 sent_signals  = set()
@@ -89,6 +90,9 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
             stars = "★" * signal.confidence + "☆" * (5 - signal.confidence)
             print(f"  [{symbol}] ✅ {signal.model} {signal.direction} @ {signal.entry} [{stars}]")
             send_signal(signal)
+            # Alpaca entegrasyonu aktifse otomatik emir gönder
+            if ALPACA_API_KEY:
+                execute_signal(signal)
             sent_signals.add(sig_key)
     else:
         print(f"  [{symbol}] Kurulum yok.")
@@ -105,6 +109,14 @@ def main():
     all_symbols = (
         SYMBOLS["forex"] + SYMBOLS["crypto"] + SYMBOLS["indices"]
     )
+
+    # Alpaca hesap bilgisi
+    if ALPACA_API_KEY:
+        try:
+            acc = get_account_info()
+            print(f"  Alpaca {('PAPER' if True else 'LIVE')} | Sermaye: ${acc['equity']:.2f}")
+        except Exception as e:
+            print(f"  Alpaca bağlantı hatası: {e}")
 
     send_startup_message(all_symbols)
 
