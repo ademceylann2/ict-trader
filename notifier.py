@@ -8,21 +8,25 @@ def format_signal(signal: Signal) -> str:
     bias_emoji = "📈" if signal.bias in ("BULLISH", "CHOCH_BULLISH") else "📉"
     model = getattr(signal, "model", "")
     model_badge = {
-        "UNICORN":       "🦄 UNICORN",
+        "UNICORN":       "🦄 UNICORN MODEL",
         "SILVER_BULLET": "🥈 SILVER BULLET",
-        "OTE":           "📐 OTE",
+        "OTE":           "📐 OTE 62-79%",
         "OB_FVG":        "📦 OB/FVG",
     }.get(model, "📦 OB/FVG")
+
+    confidence = getattr(signal, "confidence", 3)
+    stars = "★" * confidence + "☆" * (5 - confidence)
 
     confluences_text = "\n".join(f"  ✅ {c}" for c in signal.confluences)
 
     return f"""
 ╔══════════════════════════════╗
-║    🎯 ICT SİNYAL - {signal.symbol}
+║  🎯 ICT SİNYAL v3 — {signal.symbol}
 ╚══════════════════════════════╝
 
 {direction_emoji} | {bias_emoji} Bias: {signal.bias}
 {model_badge}
+⭐ Güven: {stars} ({confidence}/5)
 ⏰ Kill Zone: {signal.kill_zone.upper()}
 📐 Setup: {signal.setup}
 
