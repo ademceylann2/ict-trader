@@ -23,12 +23,24 @@ class MarketData:
             return pd.DataFrame()
 
     def get_current_kill_zone(self) -> str:
-        """Şu an hangi ICT Kill Zone'undayız?"""
-        from config import KILL_ZONES
-        now_utc = datetime.utcnow()
-        current_time = now_utc.strftime("%H:%M")
+        """Şu an hangi ICT Kill Zone'undayız? (ET bazlı, DST farkındalıklı)"""
+        et = pytz.timezone("America/New_York")
+        now_et = datetime.now(et)
+        current_time = now_et.strftime("%H:%M")
 
-        for zone_name, zone in KILL_ZONES.items():
+        # ICT Kill Zone times in ET (Eastern Time, DST-aware):
+        # Asian:    19:00-22:00 ET (7PM-10PM)
+        # London:   02:00-05:00 ET (2AM-5AM)
+        # New York: 07:00-10:00 ET (7AM-10AM) — NY AM session
+        # NY Close: 14:00-16:00 ET (2PM-4PM)
+        KILL_ZONES_ET = {
+            "asia":      {"start": "19:00", "end": "22:00"},
+            "london":    {"start": "02:00", "end": "05:00"},
+            "new_york":  {"start": "07:00", "end": "10:00"},
+            "ny_close":  {"start": "14:00", "end": "16:00"},
+        }
+
+        for zone_name, zone in KILL_ZONES_ET.items():
             if zone["start"] <= current_time <= zone["end"]:
                 return zone_name
 
