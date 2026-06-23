@@ -6,6 +6,13 @@ from ict_analyzer import Signal
 def format_signal(signal: Signal) -> str:
     direction_emoji = "🟢 LONG" if signal.direction == "LONG" else "🔴 SHORT"
     bias_emoji = "📈" if signal.bias in ("BULLISH", "CHOCH_BULLISH") else "📉"
+    model = getattr(signal, "model", "")
+    model_badge = {
+        "UNICORN":       "🦄 UNICORN",
+        "SILVER_BULLET": "🥈 SILVER BULLET",
+        "OTE":           "📐 OTE",
+        "OB_FVG":        "📦 OB/FVG",
+    }.get(model, "📦 OB/FVG")
 
     confluences_text = "\n".join(f"  ✅ {c}" for c in signal.confluences)
 
@@ -15,6 +22,7 @@ def format_signal(signal: Signal) -> str:
 ╚══════════════════════════════╝
 
 {direction_emoji} | {bias_emoji} Bias: {signal.bias}
+{model_badge}
 ⏰ Kill Zone: {signal.kill_zone.upper()}
 📐 Setup: {signal.setup}
 

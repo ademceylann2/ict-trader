@@ -21,14 +21,16 @@ sent_signals  = set() # Aynı sinyali tekrar gönderme
 def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
                 kill_zone: str) -> None:
     """Tek bir sembolü ICT mantığıyla analiz et."""
-    df_htf = data.get_ohlcv(symbol, interval=TIMEFRAMES["htf"], period="10d")
-    df_mtf = data.get_ohlcv(symbol, interval=TIMEFRAMES["mtf"], period="3d")
+    df_htf   = data.get_ohlcv(symbol, interval=TIMEFRAMES["htf"], period="10d")
+    df_mtf   = data.get_ohlcv(symbol, interval=TIMEFRAMES["mtf"], period="3d")
+    df_daily = data.get_ohlcv(symbol, interval="1d", period="90d")   # IPDA için
 
     if df_htf.empty or df_mtf.empty:
         print(f"  [{symbol}] Veri alınamadı, atlanıyor.")
         return
 
-    signal = analyzer.generate_signal(df_htf, df_mtf, kill_zone, news_clear=True)
+    signal = analyzer.generate_signal(df_htf, df_mtf, kill_zone, news_clear=True,
+                                      df_daily=df_daily if not df_daily.empty else None)
 
     if signal:
         sig_key = f"{signal.symbol}_{signal.direction}_{signal.entry}"
