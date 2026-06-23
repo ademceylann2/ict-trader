@@ -902,6 +902,244 @@ class ICTAnalyzer:
         return {"found": False}
 
     # ══════════════════════════════════════════════════════════════════════
+    # CBDR — Central Bank Dealers Range (ICT 2017 Month 8)
+    # 14:00–20:00 NY arası range → ertesi günün H/L projeksiyon hedefi
+    # ══════════════════════════════════════════════════════════════════════
+    def calculate_cbdr(self, df_1h: pd.DataFrame) -> dict:
+        """
+        CBDR: 14:00-20:00 NY arası mumların body high/low'u.
+        Standart deviasyon = CBDR yüksekliği.
+        Bullish: -1/-2 std = büyük ihtimal gün dibi (hedef: +2/+3 std)
+        Bearish: +1/+2 std = büyük ihtimal gün tepesi (hedef: -2/-3 std)
+        """
+        if df_1h.empty or len(df_1h) < 24:
+            return {}
+
+        df = df_1h.copy()
+        df.index = pd.to_datetime(df.index, utc=True).tz_convert(self._et)
+        today = df.index[-1].date()
+
+        cbdr_df = df[
+            (df.index.date == today) &
+            (df.index.hour >= 14) &
+            (df.index.hour < 20)
+        ]
+
+        if len(cbdr_df) < 2:
+            return {}
+
+        # ICT: body high/low kullan (wick değil)
+        body_high = cbdr_df.apply(lambda r: max(r["Open"], r["Close"]), axis=1).max()
+        body_low  = cbdr_df.apply(lambda r: min(r["Open"], r["Close"]), axis=1).min()
+        cbdr_range = body_high - body_low
+
+        if cbdr_range <= 0:
+            return {}
+
+        return {
+            "high":    body_high,
+            "low":     body_low,
+            "range":   cbdr_range,
+            "std1_up": body_high + cbdr_range,
+            "std2_up": body_high + 2 * cbdr_range,
+            "std3_up": body_high + 3 * cbdr_range,
+            "std1_dn": body_low  - cbdr_range,
+            "std2_dn": body_low  - 2 * cbdr_range,
+            "std3_dn": body_low  - 3 * cbdr_range,
+            "valid":   cbdr_range < 0.005 * body_high,  # <0.5% = ideal
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ADR — Average Daily Range (ICT 2017)
+    # Son N günün ortalama yüksek-alçak farkı = günün öngörülen genişliği
+    # ══════════════════════════════════════════════════════════════════════
+    def calculate_adr(self, df_daily: pd.DataFrame, periods: int = 14) -> dict:
+        """
+        ADR: Son 14 günün High-Low ortalaması.
+        1/3 ADR = Judas Swing sınırı (bu seviyeyi aşarsa sahte hareket teyit)
+        Günün açılışı ± ADR = hedef H/L projeksiyonu.
+        """
+        if df_daily is None or len(df_daily) < periods:
+            return {}
+
+        daily_ranges = (df_daily["High"] - df_daily["Low"]).tail(periods)
+        adr          = daily_ranges.mean()
+        today_open   = df_daily["Open"].iloc[-1]
+
+        return {
+            "adr":         round(adr, 4),
+            "adr_third":   round(adr / 3, 4),      # Judas Swing eşiği
+            "proj_high":   round(today_open + adr, 4),
+            "proj_low":    round(today_open - adr, 4),
+            "proj_high50": round(today_open + adr * 0.5, 4),
+            "proj_low50":  round(today_open - adr * 0.5, 4),
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PROPULSION BLOCK (ICT 2017 Month 4)
+    # OB içine giren ve fiyatı oradan fırlatan tek mum
+    # ══════════════════════════════════════════════════════════════════════
+    def find_propulsion_blocks(self, df: pd.DataFrame) -> list:
+        """
+        Propulsion Block: OB'ye giren sonra hızla ters dönen mum.
+        Geri test → midpoint (50%) ihlal edilmeden tepki = geçerli giriş.
+        """
+        obs   = self.find_order_blocks(df)
+        props = []
+        for ob in obs:
+            idx = ob["index"]
+            if idx + 3 >= len(df):
+                continue
+
+            # OB sonrası fiyat OB içine girip geri döndü mü?
+            for j in range(idx + 1, min(idx + 6, len(df) - 1)):
+                c = df["Close"].iloc[j]
+                h = df["High"].iloc[j]
+                l = df["Low"].iloc[j]
+                mid = ob["50pct"]
+
+                if ob["type"] == "BULLISH_OB":
+                    # Fiyat OB içine indi ama midpoint'i kapatmadı → propulsion
+                    if l <= ob["top"] and c > mid:
+                        props.append({
+                            "type":    "BULLISH_PROPULSION",
+                            "top":     ob["top"],
+                            "bottom":  ob["bottom"],
+                            "midpoint": mid,
+                            "index":   j,
+                            "time":    df.index[j],
+                            "desc":    f"Propulsion Long @ {round(mid,4)} (OB mid)"
+                        })
+                        break
+                elif ob["type"] == "BEARISH_OB":
+                    if h >= ob["bottom"] and c < mid:
+                        props.append({
+                            "type":    "BEARISH_PROPULSION",
+                            "top":     ob["top"],
+                            "bottom":  ob["bottom"],
+                            "midpoint": mid,
+                            "index":   j,
+                            "time":    df.index[j],
+                            "desc":    f"Propulsion Short @ {round(mid,4)} (OB mid)"
+                        })
+                        break
+        return props
+
+    # ══════════════════════════════════════════════════════════════════════
+    # MITIGATION BLOCK (ICT 2017 Month 4)
+    # Kurumların zararlı pozisyonlarını kapattığı eski OB bölgesi
+    # ══════════════════════════════════════════════════════════════════════
+    def find_mitigation_blocks(self, df: pd.DataFrame) -> list:
+        """
+        Mitigation Block: Fiyat OB'ye geri dönerek onu 'mitigate' etti
+        (kurumlar zararı kapattı). Fiyat tekrar o bölgeye gelirse daha
+        zayıf tepki — ama hâlâ destek/direnç olarak işlev görür.
+        """
+        obs  = self.find_order_blocks(df)
+        mits = []
+        for ob in obs:
+            touched = False
+            for j in range(ob["index"] + 1, len(df)):
+                c = df["Close"].iloc[j]
+                if ob["type"] == "BULLISH_OB" and c < ob["50pct"]:
+                    touched = True
+                    mits.append({
+                        "type":     "BULLISH_MITIGATION",
+                        "top":      ob["top"],
+                        "bottom":   ob["bottom"],
+                        "midpoint": ob["50pct"],
+                        "mitigated_at": j,
+                        "desc":     f"Mitigated Bull OB: {round(ob['bottom'],4)}-{round(ob['top'],4)}"
+                    })
+                    break
+                if ob["type"] == "BEARISH_OB" and c > ob["50pct"]:
+                    touched = True
+                    mits.append({
+                        "type":     "BEARISH_MITIGATION",
+                        "top":      ob["top"],
+                        "bottom":   ob["bottom"],
+                        "midpoint": ob["50pct"],
+                        "mitigated_at": j,
+                        "desc":     f"Mitigated Bear OB: {round(ob['bottom'],4)}-{round(ob['top'],4)}"
+                    })
+                    break
+        return mits
+
+    # ══════════════════════════════════════════════════════════════════════
+    # VACUUM BLOCK / LIQUIDITY VOID (ICT 2017 Month 4)
+    # Fiyatın çok hızlı geçtiği bölge — geri dönüş beklenir
+    # ══════════════════════════════════════════════════════════════════════
+    def find_vacuum_blocks(self, df: pd.DataFrame, speed_mult: float = 3.0) -> list:
+        """
+        Vacuum Block: Bir mumun range'i ATR'nin speed_mult katından büyükse
+        ve içinde neredeyse hiç geri çekilme yoksa → fiyat bu bölgeye döner.
+        """
+        if len(df) < 20:
+            return []
+
+        atr     = (df["High"] - df["Low"]).rolling(14).mean()
+        vacuums = []
+
+        for i in range(14, len(df) - 1):
+            candle_range = df["High"].iloc[i] - df["Low"].iloc[i]
+            if atr.iloc[i] <= 0:
+                continue
+            if candle_range < atr.iloc[i] * speed_mult:
+                continue
+
+            bull_vac = df["Close"].iloc[i] > df["Open"].iloc[i]
+            bear_vac = df["Close"].iloc[i] < df["Open"].iloc[i]
+
+            if bull_vac:
+                vacuums.append({
+                    "type":    "BULLISH_VACUUM",
+                    "top":     df["High"].iloc[i],
+                    "bottom":  df["Low"].iloc[i],
+                    "midpoint": (df["High"].iloc[i] + df["Low"].iloc[i]) / 2,
+                    "index":   i,
+                    "speed":   round(candle_range / atr.iloc[i], 1),
+                })
+            elif bear_vac:
+                vacuums.append({
+                    "type":    "BEARISH_VACUUM",
+                    "top":     df["High"].iloc[i],
+                    "bottom":  df["Low"].iloc[i],
+                    "midpoint": (df["High"].iloc[i] + df["Low"].iloc[i]) / 2,
+                    "index":   i,
+                    "speed":   round(candle_range / atr.iloc[i], 1),
+                })
+        return vacuums
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PSYCHOLOGICAL LEVELS — Yuvarlak sayılar (ICT 2017 + Filling Numbers)
+    # Altın için: $3300, $3350, $3400 gibi seviyeleri yakala
+    # ══════════════════════════════════════════════════════════════════════
+    def find_psychological_levels(self, current: float, step: float = None) -> list:
+        """
+        Yakın yuvarlak sayıları bul.
+        Altın için step=50 (3300, 3350...), Forex için step=0.01
+        """
+        if step is None:
+            if current > 1000:     step = 50     # Gold
+            elif current > 100:    step = 10
+            elif current > 10:     step = 1
+            elif current > 1:      step = 0.05
+            else:                  step = 0.001
+
+        levels = []
+        base = round(current / step) * step
+        for mult in [-3, -2, -1, 0, 1, 2, 3]:
+            lvl = base + mult * step
+            pct_away = abs(lvl - current) / current
+            if pct_away < 0.02:   # %2 yakınındaki seviyeleri ekle
+                levels.append({
+                    "price":   round(lvl, 5),
+                    "pct_away": round(pct_away * 100, 3),
+                    "type":    "above" if lvl > current else "below"
+                })
+        return levels
+
+    # ══════════════════════════════════════════════════════════════════════
     # PREMIUM / DISCOUNT
     # ══════════════════════════════════════════════════════════════════════
     def get_premium_discount(self, df: pd.DataFrame, lookback: int = 50) -> dict:
@@ -939,15 +1177,19 @@ class ICTAnalyzer:
         current   = df_mtf["Close"].iloc[-1]
 
         # MTF analiz setleri — BISI/SIBI etiketli FVG (BUG FIX)
-        fvgs     = self.find_fvg_classified(df_mtf)   # BISI/SIBI etiketli
-        ifvgs    = self.find_ifvg(df_mtf)
-        obs      = self.find_order_blocks(df_mtf)
-        breakers = self.find_breaker_blocks(df_mtf)
-        unicorns = self.find_unicorn(df_mtf)
-        ote      = self.find_ote(df_htf, bias)
-        bprs     = self.find_bpr(df_mtf)
-        rej_blks = self.find_rejection_blocks(df_mtf)
+        fvgs      = self.find_fvg_classified(df_mtf)
+        ifvgs     = self.find_ifvg(df_mtf)
+        obs       = self.find_order_blocks(df_mtf)
+        breakers  = self.find_breaker_blocks(df_mtf)
+        unicorns  = self.find_unicorn(df_mtf)
+        ote       = self.find_ote(df_htf, bias)
+        bprs      = self.find_bpr(df_mtf)
+        rej_blks  = self.find_rejection_blocks(df_mtf)
         first_fvg = self.find_first_presented_fvg(df_mtf)
+        props     = self.find_propulsion_blocks(df_mtf)
+        mits      = self.find_mitigation_blocks(df_mtf)
+        vacuums   = self.find_vacuum_blocks(df_mtf)
+        psych_lvl = self.find_psychological_levels(current)
 
         # Ek bağlam
         sb_window    = self.is_silver_bullet_window()
@@ -964,8 +1206,12 @@ class ICTAnalyzer:
         inducement   = self.detect_inducement(df_mtf, bias)
         venom        = self.detect_venom_setup(df_mtf) if self.symbol in ("NQ=F","ES=F") else {"found": False}
 
-        # NDOG/NWOG seviyeleri — likidite hedefleri (BUG FIX: önceden hiç çağrılmıyordu)
+        # NDOG/NWOG seviyeleri
         opening_gaps = self.find_opening_gaps(df_htf) if len(df_htf) >= 48 else {}
+
+        # CBDR & ADR (2017 mentorship)
+        cbdr = self.calculate_cbdr(df_htf)
+        adr  = self.calculate_adr(df_daily) if df_daily is not None and not df_daily.empty else {}
 
         # IPDA
         ipda = {}
@@ -1015,6 +1261,21 @@ class ICTAnalyzer:
         for nd in opening_gaps.get("ndog", [])[:3]:
             if abs(current - nd["midpoint"]) / current < 0.005:
                 base.append(f"NDOG CE: {round(nd['midpoint'],4)} ({nd['direction']})")
+
+        # CBDR seviyeleri
+        if cbdr:
+            for k in ["std1_up","std2_up","std1_dn","std2_dn"]:
+                if abs(current - cbdr[k]) / current < 0.004:
+                    base.append(f"CBDR {k}: {round(cbdr[k],4)}")
+
+        # ADR hedef projeksiyon
+        if adr:
+            base.append(f"ADR: {adr['adr']} | Hedef H:{adr['proj_high']} L:{adr['proj_low']}")
+
+        # Psikolojik seviyeler
+        for pl in psych_lvl:
+            if pl["pct_away"] < 0.3:
+                base.append(f"Psik. Seviye: {pl['price']} ({pl['type']}, %{pl['pct_away']} uzakta)")
 
         q3_warning = q_theory["quarter"] == "Q3"  # Q3 düşük güven
 
@@ -1103,7 +1364,16 @@ class ICTAnalyzer:
                         confs.append(f"Rejection Block: {rb['wick_ratio']}x fitil")
                         break
 
-            # 8. FVG (BISI) ★★
+            # 8. Propulsion Block ★★★
+            if not entry_zone:
+                for p in reversed(props):
+                    if p["type"] == "BULLISH_PROPULSION" and p["bottom"] <= current <= p["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            p, p["desc"], "OB_FVG", 3
+                        confs.append(f"Propulsion Block: midpoint {round(p['midpoint'],4)}")
+                        break
+
+            # 9. FVG (BISI) ★★
             if not entry_zone:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BULLISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
@@ -1111,7 +1381,7 @@ class ICTAnalyzer:
                         confs.append(f"BISI CE: {round(fvg['midpoint'],4)}")
                         break
 
-            # 9. Order Block ★★
+            # 10. Order Block ★★
             if not entry_zone:
                 for ob in reversed(obs):
                     if ob["type"] == "BULLISH_OB" and ob["bottom"] <= current <= ob["top"]:
@@ -1144,6 +1414,15 @@ class ICTAnalyzer:
                 if nwog and nwog["midpoint"] > current:
                     tp2 = nwog["midpoint"]
                     confs.append(f"NWOG CE hedef: {round(tp2,4)}")
+
+                # CBDR std dev hedefi (Bullish: +2/+3 std)
+                if cbdr and cbdr.get("std2_up", 0) > current:
+                    tp2 = cbdr["std2_up"]
+                    confs.append(f"CBDR +2σ hedef: {round(tp2,4)}")
+
+                # ADR Yüksek projeksiyonu
+                if adr and adr.get("proj_high", 0) > current:
+                    confs.append(f"ADR Yüksek: {adr['proj_high']}")
 
                 # ICT Macro penceresi bonus
                 if macro_win:
@@ -1284,7 +1563,16 @@ class ICTAnalyzer:
                         confs.append(f"Rejection Block: {rb['wick_ratio']}x fitil")
                         break
 
-            # 8. FVG (SIBI) ★★
+            # 8. Propulsion Block ★★★
+            if not entry_zone:
+                for p in reversed(props):
+                    if p["type"] == "BEARISH_PROPULSION" and p["bottom"] <= current <= p["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            p, p["desc"], "OB_FVG", 3
+                        confs.append(f"Propulsion Block: midpoint {round(p['midpoint'],4)}")
+                        break
+
+            # 9. FVG (SIBI) ★★
             if not entry_zone:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BEARISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
@@ -1292,7 +1580,7 @@ class ICTAnalyzer:
                         confs.append(f"SIBI CE: {round(fvg['midpoint'],4)}")
                         break
 
-            # 9. Order Block ★★
+            # 10. Order Block ★★
             if not entry_zone:
                 for ob in reversed(obs):
                     if ob["type"] == "BEARISH_OB" and ob["bottom"] <= current <= ob["top"]:
@@ -1323,6 +1611,15 @@ class ICTAnalyzer:
                 if nwog and nwog["midpoint"] < current:
                     tp2 = nwog["midpoint"]
                     confs.append(f"NWOG CE hedef: {round(tp2,4)}")
+
+                # CBDR std dev hedefi (Bearish: -2/-3 std)
+                if cbdr and cbdr.get("std2_dn", float("inf")) < current:
+                    tp2 = cbdr["std2_dn"]
+                    confs.append(f"CBDR -2σ hedef: {round(tp2,4)}")
+
+                # ADR Düşük projeksiyonu
+                if adr and adr.get("proj_low", float("inf")) < current:
+                    confs.append(f"ADR Düşük: {adr['proj_low']}")
 
                 # ICT Macro penceresi bonus
                 if macro_win:
