@@ -1365,6 +1365,158 @@ class ICTAnalyzer:
         }
 
     # ══════════════════════════════════════════════════════════════════════
+    # BREAKAWAY GAP (ICT 2022/2024) — FVG protected by holding mechanism
+    # 3 holding mechanisms: Breaker Block, Inverse FVG, Balanced Price Range
+    # Entry: at the holding mechanism, NOT the gap itself.
+    # Target: the breakaway gap is the TP.
+    # ══════════════════════════════════════════════════════════════════════
+    def find_breakaway_gaps(self, df: pd.DataFrame) -> list:
+        """
+        Breakaway Gap: unmitigated FVG protected by a holding mechanism.
+        Holding mechanism = Breaker, IFVG, or BPR between gap and current price.
+        These serve as TP targets (not entries).
+        """
+        fvgs     = self.find_fvg_classified(df)
+        breakers = self.find_breaker_blocks(df)
+        ifvgs    = self.find_ifvg(df)
+        bprs     = self.find_bpr(df)
+        current  = df["Close"].iloc[-1]
+
+        breakaway = []
+        closes = df["Close"].values
+
+        for fvg in fvgs:
+            idx  = fvg["index"]
+            # Check if FVG has NOT been mitigated (price never entered it)
+            mitigated = False
+            for j in range(idx + 2, len(df)):
+                if fvg["type"] == "BULLISH_FVG":
+                    if closes[j] < fvg["top"] and closes[j] > fvg["bottom"]:
+                        mitigated = True
+                        break
+                else:
+                    if closes[j] > fvg["bottom"] and closes[j] < fvg["top"]:
+                        mitigated = True
+                        break
+
+            if mitigated:
+                continue
+
+            # Check for a holding mechanism between the FVG and current price
+            holding = None
+            if fvg["type"] == "BULLISH_FVG" and current > fvg["top"]:
+                # Holding mechanism ABOVE current for bearish (to prevent gap from being filled)
+                for b in breakers:
+                    if b["type"] == "BULLISH_BREAKER" and fvg["top"] < b["bottom"] < current:
+                        holding = ("BREAKER", b)
+                        break
+                if not holding:
+                    for i in ifvgs:
+                        if i["type"] == "BULLISH_IFVG" and fvg["top"] < i["bottom"] < current:
+                            holding = ("IFVG", i)
+                            break
+                if not holding:
+                    for bpr in bprs:
+                        if fvg["top"] < bpr["bottom"] < current:
+                            holding = ("BPR", bpr)
+                            break
+
+            elif fvg["type"] == "BEARISH_FVG" and current < fvg["bottom"]:
+                for b in breakers:
+                    if b["type"] == "BEARISH_BREAKER" and current < b["top"] < fvg["bottom"]:
+                        holding = ("BREAKER", b)
+                        break
+                if not holding:
+                    for i in ifvgs:
+                        if i["type"] == "BEARISH_IFVG" and current < i["top"] < fvg["bottom"]:
+                            holding = ("IFVG", i)
+                            break
+                if not holding:
+                    for bpr in bprs:
+                        if current < bpr["top"] < fvg["bottom"]:
+                            holding = ("BPR", bpr)
+                            break
+
+            if holding:
+                breakaway.append({
+                    "type":     fvg["type"],
+                    "top":      fvg["top"],
+                    "bottom":   fvg["bottom"],
+                    "midpoint": fvg["midpoint"],
+                    "fvg":      fvg,
+                    "holding":  holding[0],
+                    "holding_zone": holding[1],
+                    "desc": (f"Breakaway Gap ({holding[0]}): "
+                             f"{round(fvg['bottom'],4)}-{round(fvg['top'],4)}"),
+                })
+
+        return breakaway
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ERL / IRL PHASE — External/Internal Range Liquidity cycle (ICT 2022)
+    # ERL = above swing high (BSL) or below swing low (SSL)
+    # IRL = FVGs/OBs inside the active dealing range
+    # Cycle: ERL → IRL → ERL → IRL (institutions alternate sweeps & fills)
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_erl_irl_phase(self, df: pd.DataFrame, bias: str) -> dict:
+        """
+        Classifies whether price is in ERL delivery or IRL delivery phase.
+        ERL delivery: price targeting swing high/low (BSL/SSL externals)
+        IRL delivery: price retrace targeting FVGs/OBs inside range
+        """
+        if len(df) < 15:
+            return {"phase": "UNKNOWN"}
+
+        sh, sl  = self._swing_points(df, strength=3)
+        fvgs    = self.find_fvg_classified(df)
+        current = df["Close"].iloc[-1]
+
+        if not sh or not sl:
+            return {"phase": "UNKNOWN"}
+
+        last_high = sh[-1][1]
+        last_low  = sl[-1][1]
+        mid_range = (last_high + last_low) / 2
+
+        # Recent sweep check (last 5 candles)
+        last5_high = df["High"].iloc[-5:].max()
+        last5_low  = df["Low"].iloc[-5:].min()
+
+        swept_high = last5_high > last_high and current < last_high
+        swept_low  = last5_low  < last_low  and current > last_low
+
+        # IRL: any unmitigated FVGs inside the range
+        irl_fvgs_up = [f for f in fvgs if f["type"] == "BULLISH_FVG"
+                       and last_low < f["top"] < last_high and current < f["bottom"]]
+        irl_fvgs_dn = [f for f in fvgs if f["type"] == "BEARISH_FVG"
+                       and last_low < f["bottom"] < last_high and current > f["top"]]
+
+        if swept_high and irl_fvgs_dn:
+            return {
+                "phase":    "IRL_DELIVERY_BEARISH",
+                "desc":     "ERL sweep (BSL) → IRL teslim (Bearish): FVG içine dön",
+                "irl_fvg":  irl_fvgs_dn[0],
+                "erl_high": last_high,
+                "erl_low":  last_low,
+            }
+        if swept_low and irl_fvgs_up:
+            return {
+                "phase":    "IRL_DELIVERY_BULLISH",
+                "desc":     "ERL sweep (SSL) → IRL teslim (Bullish): FVG'ye gel",
+                "irl_fvg":  irl_fvgs_up[0],
+                "erl_high": last_high,
+                "erl_low":  last_low,
+            }
+        if bias in ("BULLISH", "CHOCH_BULLISH") and current > mid_range:
+            return {"phase": "ERL_DELIVERY_BULLISH", "desc": "ERL hedef: BSL (swing high)",
+                    "erl_target": last_high}
+        if bias in ("BEARISH", "CHOCH_BEARISH") and current < mid_range:
+            return {"phase": "ERL_DELIVERY_BEARISH", "desc": "ERL hedef: SSL (swing low)",
+                    "erl_target": last_low}
+
+        return {"phase": "RANGING", "desc": "Range ortası — ERL/IRL henüz belirsiz"}
+
+    # ══════════════════════════════════════════════════════════════════════
     # RDRB — Redelivered Rebalanced Price Range (ICT hidden PD Array)
     # Two consecutive candles: deliver → wick pullback → redeliver same dir
     # Wick = rebalancing zone. If price returns → strong reaction.
@@ -1933,6 +2085,8 @@ class ICTAnalyzer:
         weekly_ref    = self.find_weekly_open(df_htf)
         intraday_prof = self.detect_intraday_profile(df_htf)
         dol           = self.find_draw_on_liquidity(df_daily, df_htf) if df_daily is not None and not df_daily.empty else {}
+        breakaway_gaps = self.find_breakaway_gaps(df_mtf)
+        erl_irl       = self.detect_erl_irl_phase(df_htf, bias)
 
         # NDOG/NWOG seviyeleri
         opening_gaps = self.find_opening_gaps(df_htf) if len(df_htf) >= 48 else {}
@@ -2051,6 +2205,15 @@ class ICTAnalyzer:
             base.append(f"DOL: {dol['dol_desc']}")
         if dol.get("inside_bar"):
             base.append("Inside Bar: düşük volatilite — kırılış bekle")
+
+        # ERL/IRL Faz
+        if erl_irl.get("phase") not in ("UNKNOWN", "RANGING", None):
+            base.append(f"ERL/IRL: {erl_irl['desc']}")
+
+        # Breakaway Gap hedefleri
+        for bg in breakaway_gaps[:2]:
+            dist_pct = abs(bg["midpoint"] - current) / current * 100
+            base.append(f"Breakaway Gap ({bg['holding']}): {round(bg['bottom'],4)}-{round(bg['top'],4)} ({dist_pct:.1f}% uzakta)")
 
         # ══════════════ LONG KURULUMU ════════════════════════════════════
         if bias in ("BULLISH", "CHOCH_BULLISH") and pd_zone["zone"] == "DISCOUNT":
@@ -2263,6 +2426,21 @@ class ICTAnalyzer:
                 if inducement.get("found") and inducement.get("direction") == "BULLISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası long ✓")
+
+                # ERL/IRL phase alignment (+1 yıldız)
+                if erl_irl.get("phase") in ("IRL_DELIVERY_BULLISH", "ERL_DELIVERY_BULLISH"):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"ERL/IRL Bullish: {erl_irl['desc']} ✓")
+                    # Use ERL target as TP2
+                    if erl_irl.get("erl_target", 0) > current:
+                        tp2 = erl_irl["erl_target"]
+
+                # Breakaway Gap bullish TP hedefi
+                bg_up = [bg for bg in breakaway_gaps if bg["type"] == "BULLISH_FVG" and bg["midpoint"] > current]
+                if bg_up:
+                    nearest_bg = min(bg_up, key=lambda x: x["midpoint"])
+                    tp1 = nearest_bg["midpoint"]
+                    confs.append(f"Breakaway Gap TP: {round(nearest_bg['bottom'],4)}-{round(nearest_bg['top'],4)} ({nearest_bg['holding']}) ✓")
 
                 # Intraday Profile alignment (+1 yıldız)
                 if intraday_prof.get("direction") == "BULLISH" and \
@@ -2548,6 +2726,20 @@ class ICTAnalyzer:
                 if inducement.get("found") and inducement.get("direction") == "BEARISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası short ✓")
+
+                # ERL/IRL phase alignment (+1 yıldız)
+                if erl_irl.get("phase") in ("IRL_DELIVERY_BEARISH", "ERL_DELIVERY_BEARISH"):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"ERL/IRL Bearish: {erl_irl['desc']} ✓")
+                    if erl_irl.get("erl_target", float("inf")) < current:
+                        tp2 = erl_irl["erl_target"]
+
+                # Breakaway Gap bearish TP hedefi
+                bg_dn = [bg for bg in breakaway_gaps if bg["type"] == "BEARISH_FVG" and bg["midpoint"] < current]
+                if bg_dn:
+                    nearest_bg = max(bg_dn, key=lambda x: x["midpoint"])
+                    tp1 = nearest_bg["midpoint"]
+                    confs.append(f"Breakaway Gap TP: {round(nearest_bg['bottom'],4)}-{round(nearest_bg['top'],4)} ({nearest_bg['holding']}) ✓")
 
                 # Intraday Profile alignment (+1 yıldız)
                 if intraday_prof.get("direction") == "BEARISH" and \
