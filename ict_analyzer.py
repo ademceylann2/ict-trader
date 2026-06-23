@@ -342,16 +342,179 @@ class ICTAnalyzer:
         """find_fvg'yi BISI/SIBI etiketiyle zenginleştirir."""
         fvgs = self.find_fvg(df, min_size_pct)
         for f in fvgs:
-            idx = f["index"]
-            if idx < len(df):
-                mid_close = df["Close"].iloc[idx]
-                mid_open  = df["Open"].iloc[idx]
-                if f["type"] == "BULLISH_FVG":
-                    f["label"] = "BISI"  # Buy-Side Imbalance Sell-Side Inefficiency
-                else:
-                    f["label"] = "SIBI"  # Sell-Side Imbalance Buy-Side Inefficiency
-                f["consequent_encroachment"] = f["midpoint"]  # 50% seviye
+            f["label"] = "BISI" if f["type"] == "BULLISH_FVG" else "SIBI"
+            f["consequent_encroachment"] = f["midpoint"]
         return fvgs
+
+    # ══════════════════════════════════════════════════════════════════════
+    # BALANCED PRICE RANGE (BPR) — İki çakışan FVG → ultra güçlü bölge
+    # ICT: BISI + SIBI çakışması = kurumsal dengeleme bölgesi
+    # ══════════════════════════════════════════════════════════════════════
+    def find_bpr(self, df: pd.DataFrame) -> list:
+        """
+        BPR: Bullish FVG ile Bearish FVG çakışıyorsa oluşur.
+        Çakışan bölge hem destek hem direnç olabilir — bias yönünde kullan.
+        """
+        fvgs = self.find_fvg_classified(df)
+        bull_fvgs = [f for f in fvgs if f["type"] == "BULLISH_FVG"]
+        bear_fvgs = [f for f in fvgs if f["type"] == "BEARISH_FVG"]
+        bprs = []
+        for bf in bull_fvgs:
+            for sf in bear_fvgs:
+                overlap_top    = min(bf["top"], sf["top"])
+                overlap_bottom = max(bf["bottom"], sf["bottom"])
+                if overlap_top > overlap_bottom:
+                    bprs.append({
+                        "top":      overlap_top,
+                        "bottom":   overlap_bottom,
+                        "midpoint": (overlap_top + overlap_bottom) / 2,
+                        "type":     "BPR",
+                        "bull_fvg": bf,
+                        "bear_fvg": sf,
+                    })
+        return bprs
+
+    # ══════════════════════════════════════════════════════════════════════
+    # VOLUME IMBALANCE — Gövde-gövde boşluk (wick çakışması olabilir)
+    # FVG'den farkı: sadece candle body'leri arasındaki boşluk
+    # ══════════════════════════════════════════════════════════════════════
+    def find_volume_imbalance(self, df: pd.DataFrame, min_size_pct: float = 0.0003) -> list:
+        """
+        Volume Imbalance: Consecutive candle body'leri arasında boşluk.
+        FVG'den daha sık oluşur, daha zayıf ama yine de geçerli PD Array.
+        """
+        vis  = []
+        current = df["Close"].iloc[-1]
+        for i in range(1, len(df) - 1):
+            body1_top    = max(df["Open"].iloc[i-1], df["Close"].iloc[i-1])
+            body1_bottom = min(df["Open"].iloc[i-1], df["Close"].iloc[i-1])
+            body2_top    = max(df["Open"].iloc[i],   df["Close"].iloc[i])
+            body2_bottom = min(df["Open"].iloc[i],   df["Close"].iloc[i])
+
+            # Bullish VI: body2 tamamen body1'in üstünde
+            if body2_bottom > body1_top:
+                size = body2_bottom - body1_top
+                if size / current >= min_size_pct:
+                    vis.append({"type": "BULLISH_VI", "top": body2_bottom,
+                                "bottom": body1_top, "midpoint": (body2_bottom+body1_top)/2,
+                                "index": i})
+            # Bearish VI: body2 tamamen body1'in altında
+            elif body2_top < body1_bottom:
+                size = body1_bottom - body2_top
+                if size / current >= min_size_pct:
+                    vis.append({"type": "BEARISH_VI", "top": body1_bottom,
+                                "bottom": body2_top, "midpoint": (body1_bottom+body2_top)/2,
+                                "index": i})
+        return vis
+
+    # ══════════════════════════════════════════════════════════════════════
+    # REJECTION BLOCK — Uzun fitilli mum = kurumsal ret bölgesi
+    # ══════════════════════════════════════════════════════════════════════
+    def find_rejection_blocks(self, df: pd.DataFrame, wick_ratio: float = 2.5) -> list:
+        """
+        Rejection Block: Fitilin gövdeye oranı wick_ratio'dan büyükse
+        güçlü kurumsal red — destek/direnç bölgesi.
+        """
+        rbs = []
+        for i in range(1, len(df) - 1):
+            o, h, l, c = df["Open"].iloc[i], df["High"].iloc[i], df["Low"].iloc[i], df["Close"].iloc[i]
+            body    = abs(c - o)
+            up_wick = h - max(o, c)
+            dn_wick = min(o, c) - l
+            if body == 0:
+                continue
+            # Bullish Rejection (uzun alt fitil) → destek
+            if dn_wick / body >= wick_ratio and dn_wick > up_wick:
+                rbs.append({"type": "BULLISH_REJECTION", "top": max(o, c),
+                            "bottom": l, "midpoint": (max(o,c)+l)/2,
+                            "wick_ratio": round(dn_wick/body, 1), "index": i})
+            # Bearish Rejection (uzun üst fitil) → direnç
+            elif up_wick / body >= wick_ratio and up_wick > dn_wick:
+                rbs.append({"type": "BEARISH_REJECTION", "top": h,
+                            "bottom": min(o, c), "midpoint": (h+min(o,c))/2,
+                            "wick_ratio": round(up_wick/body, 1), "index": i})
+        return rbs
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 1ST PRESENTED FVG — Displacement sonrası ilk FVG (en güçlü)
+    # ICT: Displacement'tan sonraki ILGINCI FVG entry için en iyi
+    # ══════════════════════════════════════════════════════════════════════
+    def find_first_presented_fvg(self, df: pd.DataFrame) -> Optional[dict]:
+        """
+        Displacement sonrası oluşan ilk FVG → en hassas entry bölgesi.
+        """
+        disp = self.detect_displacement(df)
+        if not disp.get("found"):
+            return None
+
+        disp_time = disp.get("candle_time")
+        if disp_time is None:
+            return None
+
+        fvgs = self.find_fvg_classified(df)
+        direction = disp["direction"]
+
+        for fvg in fvgs:
+            fvg_time = fvg.get("time")
+            if fvg_time is None:
+                continue
+            after_disp = fvg_time >= disp_time
+            right_dir  = (direction == "BULLISH" and fvg["type"] == "BULLISH_FVG") or \
+                         (direction == "BEARISH" and fvg["type"] == "BEARISH_FVG")
+            if after_disp and right_dir:
+                fvg["model"] = "1ST_FVG"
+                return fvg
+
+        return None
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ICT VENOM MODEL — 90 dakikalık öncesi-açılış aralığı (Endeksler)
+    # 08:00-09:30 NY arası range → 09:30 açılışta sweep + reversal
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_venom_setup(self, df: pd.DataFrame) -> dict:
+        """
+        Venom: NQ/ES için 08:00-09:30 NY aralığını işaretle.
+        09:30 sonrası bu aralığın high veya low'u sweep + MSS → giriş.
+        """
+        if len(df) < 20:
+            return {"found": False}
+
+        df_et = df.copy()
+        df_et.index = pd.to_datetime(df_et.index, utc=True).tz_convert(self._et)
+
+        today = df_et.index[-1].date()
+        pre_mkt = df_et[
+            (df_et.index.date == today) &
+            (df_et.index.hour >= 8) &
+            (df_et.index.hour < 9) |
+            ((df_et.index.date == today) & (df_et.index.hour == 9) & (df_et.index.minute < 30))
+        ]
+
+        if len(pre_mkt) < 3:
+            return {"found": False}
+
+        venom_high = pre_mkt["High"].max()
+        venom_low  = pre_mkt["Low"].min()
+        current    = df["Close"].iloc[-1]
+        last3_high = df["High"].iloc[-3:].max()
+        last3_low  = df["Low"].iloc[-3:].min()
+
+        now_et = datetime.now(self._et)
+        if now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30):
+            return {"found": False}   # Henüz 09:30 açılmadı
+
+        if last3_low < venom_low and current > venom_low:
+            return {"found": True, "direction": "BULLISH",
+                    "range_high": venom_high, "range_low": venom_low,
+                    "target": venom_high,
+                    "desc": f"Venom Bullish: Low sweep ({round(venom_low,2)}) → {round(venom_high,2)}"}
+        if last3_high > venom_high and current < venom_high:
+            return {"found": True, "direction": "BEARISH",
+                    "range_high": venom_high, "range_low": venom_low,
+                    "target": venom_low,
+                    "desc": f"Venom Bearish: High sweep ({round(venom_high,2)}) → {round(venom_low,2)}"}
+
+        return {"found": False}
 
     # ══════════════════════════════════════════════════════════════════════
     # ICT MACROS — 8 kesin zaman penceresi (NY local → UTC dönüşüm)
@@ -775,13 +938,16 @@ class ICTAnalyzer:
         liq       = self.find_liquidity(df_htf)
         current   = df_mtf["Close"].iloc[-1]
 
-        # MTF analiz setleri
-        fvgs     = self.find_fvg(df_mtf)
+        # MTF analiz setleri — BISI/SIBI etiketli FVG (BUG FIX)
+        fvgs     = self.find_fvg_classified(df_mtf)   # BISI/SIBI etiketli
         ifvgs    = self.find_ifvg(df_mtf)
         obs      = self.find_order_blocks(df_mtf)
         breakers = self.find_breaker_blocks(df_mtf)
         unicorns = self.find_unicorn(df_mtf)
         ote      = self.find_ote(df_htf, bias)
+        bprs     = self.find_bpr(df_mtf)
+        rej_blks = self.find_rejection_blocks(df_mtf)
+        first_fvg = self.find_first_presented_fvg(df_mtf)
 
         # Ek bağlam
         sb_window    = self.is_silver_bullet_window()
@@ -796,7 +962,10 @@ class ICTAnalyzer:
         crt          = self.detect_crt(df_htf, df_mtf)
         weekly_prof  = self.weekly_profile_bias()
         inducement   = self.detect_inducement(df_mtf, bias)
-        fvgs_cls     = self.find_fvg_classified(df_mtf)
+        venom        = self.detect_venom_setup(df_mtf) if self.symbol in ("NQ=F","ES=F") else {"found": False}
+
+        # NDOG/NWOG seviyeleri — likidite hedefleri (BUG FIX: önceden hiç çağrılmıyordu)
+        opening_gaps = self.find_opening_gaps(df_htf) if len(df_htf) >= 48 else {}
 
         # IPDA
         ipda = {}
@@ -808,9 +977,8 @@ class ICTAnalyzer:
         if df_corr is not None:
             smt = self.detect_smt_divergence(df_mtf, df_corr)
 
-        # ── Cuma / Pazartesi filtresi (Weekly Profile) ──────────────────
-        if not weekly_prof.get("trade", True):
-            return None   # Cuma & Pazartesi trade yok
+        # ── Cuma / Pazartesi düşük olasılık (Weekly Profile) ─────────────
+        low_prob_day = not weekly_prof.get("trade", True)  # Cuma & Pazartesi
 
         # ── Temel confluence listesi ──────────────────────────────────────
         base = [f"Kill Zone: {kill_zone.upper()}"]
@@ -837,7 +1005,16 @@ class ICTAnalyzer:
             base.append(f"CRT: {crt['desc']}")
         if inducement.get("found"):
             base.append(f"IDM: {inducement['desc']}")
+        if venom.get("found"):
+            base.append(f"Venom: {venom['desc']}")
+        if first_fvg:
+            base.append(f"1st FVG ({first_fvg['label']}): {round(first_fvg['bottom'],4)}-{round(first_fvg['top'],4)}")
         base.append(f"Hafta: {weekly_prof['day']} ({weekly_prof['bias']})")
+
+        # NDOG seviyeleri yakınsa ekle
+        for nd in opening_gaps.get("ndog", [])[:3]:
+            if abs(current - nd["midpoint"]) / current < 0.005:
+                base.append(f"NDOG CE: {round(nd['midpoint'],4)} ({nd['direction']})")
 
         q3_warning = q_theory["quarter"] == "Q3"  # Q3 düşük güven
 
@@ -861,23 +1038,45 @@ class ICTAnalyzer:
                     confs.append("★ UNICORN: Breaker Block + FVG çakışması")
                     break
 
+            # 1b. Venom Bullish (Endeksler) ★★★★★
+            if not entry_zone and venom.get("found") and venom.get("direction") == "BULLISH":
+                entry_zone = {"bottom": current * 0.999, "top": current * 1.001}
+                setup_name, model_name, stars = "Venom Bullish", "UNICORN", 5
+                confs.append(f"★ VENOM: {venom['desc']}")
+
             # 2. Silver Bullet + FVG ★★★★★
             if not entry_zone and sb_window:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BULLISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
                         entry_zone, setup_name, model_name, stars = \
                             fvg, f"Silver Bullet ({sb_window})", "SILVER_BULLET", 5
-                        confs.append(f"Silver Bullet FVG @ {sb_window}")
+                        confs.append(f"Silver Bullet BISI @ {sb_window}")
                         break
 
-            # 3. OTE ★★★★
+            # 2b. 1st Presented FVG (displacement sonrası) ★★★★★
+            if not entry_zone and first_fvg and first_fvg.get("type") == "BULLISH_FVG":
+                if first_fvg["bottom"] <= current <= first_fvg["top"]:
+                    entry_zone, setup_name, model_name, stars = \
+                        first_fvg, "1st Presented BISI", "SILVER_BULLET", 5
+                    confs.append(f"1st BISI: displacement sonrası ilk FVG")
+
+            # 3. BPR (Balanced Price Range) ★★★★
+            if not entry_zone:
+                for bpr in reversed(bprs):
+                    if bpr["bottom"] <= current <= bpr["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            bpr, "BPR Bullish", "OTE", 4
+                        confs.append(f"BPR: BISI+SIBI çakışma bölgesi")
+                        break
+
+            # 4. OTE ★★★★
             if not entry_zone and ote and ote.get("direction") == "BULLISH":
                 if ote["bottom"] <= current <= ote["top"]:
                     entry_zone, setup_name, model_name, stars = \
                         ote, "OTE 62-79% Fib", "OTE", 4
                     confs.append(f"OTE: {round(ote['bottom'],4)}-{round(ote['top'],4)}")
 
-            # 4. IFVG ★★★
+            # 5. IFVG ★★★
             if not entry_zone:
                 for ifvg in reversed(ifvgs):
                     if ifvg["type"] == "BULLISH_IFVG" and ifvg["bottom"] <= current <= ifvg["top"]:
@@ -886,7 +1085,7 @@ class ICTAnalyzer:
                         confs.append("Bullish IFVG (Ters FVG destek)")
                         break
 
-            # 5. Bullish Breaker ★★★
+            # 6. Bullish Breaker ★★★
             if not entry_zone:
                 for b in reversed(breakers):
                     if b["type"] == "BULLISH_BREAKER" and b["bottom"] <= current <= b["top"]:
@@ -895,15 +1094,24 @@ class ICTAnalyzer:
                         confs.append("Bullish Breaker Block")
                         break
 
-            # 6. FVG ★★
+            # 7. Rejection Block ★★★
+            if not entry_zone:
+                for rb in reversed(rej_blks):
+                    if rb["type"] == "BULLISH_REJECTION" and rb["bottom"] <= current <= rb["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            rb, f"Bullish Rejection Block (wick {rb['wick_ratio']}x)", "OB_FVG", 3
+                        confs.append(f"Rejection Block: {rb['wick_ratio']}x fitil")
+                        break
+
+            # 8. FVG (BISI) ★★
             if not entry_zone:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BULLISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
-                        entry_zone, setup_name, model_name = fvg, "Bullish FVG", "OB_FVG"
-                        confs.append("Bullish FVG")
+                        entry_zone, setup_name, model_name = fvg, f"Bullish BISI", "OB_FVG"
+                        confs.append(f"BISI CE: {round(fvg['midpoint'],4)}")
                         break
 
-            # 7. Order Block ★★
+            # 9. Order Block ★★
             if not entry_zone:
                 for ob in reversed(obs):
                     if ob["type"] == "BULLISH_OB" and ob["bottom"] <= current <= ob["top"]:
@@ -923,6 +1131,19 @@ class ICTAnalyzer:
                 if ipda_up:
                     tp2 = ipda_up[0]
                     confs.append(f"IPDA hedef: {round(tp2,4)}")
+
+                # NDOG hedef (BUG FIX — artık kullanılıyor)
+                ndog_up = sorted([nd["midpoint"] for nd in opening_gaps.get("ndog",[])
+                                  if nd["midpoint"] > current and nd["direction"] == "BULLISH"])
+                if ndog_up:
+                    tp1 = ndog_up[0]
+                    confs.append(f"NDOG CE hedef: {round(tp1,4)}")
+
+                # NWOG hedef
+                nwog = opening_gaps.get("nwog")
+                if nwog and nwog["midpoint"] > current:
+                    tp2 = nwog["midpoint"]
+                    confs.append(f"NWOG CE hedef: {round(tp2,4)}")
 
                 # ICT Macro penceresi bonus
                 if macro_win:
@@ -950,7 +1171,7 @@ class ICTAnalyzer:
                 # CRT bullish onay
                 if crt.get("found") and crt.get("direction") == "BULLISH":
                     stars = min(stars + 1, 5)
-                    tp1 = crt["target"]  # CRT hedef: karşı uç
+                    tp1 = crt["target"]
                     confs.append(f"CRT Bullish hedef: {round(tp1,4)} ✓")
 
                 # IDM onayı (tuzak sonrası giriş)
@@ -961,6 +1182,11 @@ class ICTAnalyzer:
                 # Q3 uyarısı
                 if q3_warning:
                     confs.append("⚠️ Q3 — düşük güven sezonu, pozisyon küçük tut")
+                    stars = max(stars - 1, 1)
+
+                # Cuma/Pazartesi -1 yıldız (tamamen bloklamak yerine)
+                if low_prob_day:
+                    confs.append(f"⚠️ {weekly_prof['day']}: {weekly_prof['note']}")
                     stars = max(stars - 1, 1)
 
                 risk   = current - sl
@@ -993,23 +1219,45 @@ class ICTAnalyzer:
                     confs.append("★ UNICORN: Breaker Block + FVG çakışması")
                     break
 
+            # 1b. Venom Bearish (Endeksler) ★★★★★
+            if not entry_zone and venom.get("found") and venom.get("direction") == "BEARISH":
+                entry_zone = {"bottom": current * 0.999, "top": current * 1.001}
+                setup_name, model_name, stars = "Venom Bearish", "UNICORN", 5
+                confs.append(f"★ VENOM: {venom['desc']}")
+
             # 2. Silver Bullet + FVG ★★★★★
             if not entry_zone and sb_window:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BEARISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
                         entry_zone, setup_name, model_name, stars = \
                             fvg, f"Silver Bullet ({sb_window})", "SILVER_BULLET", 5
-                        confs.append(f"Silver Bullet FVG @ {sb_window}")
+                        confs.append(f"Silver Bullet SIBI @ {sb_window}")
                         break
 
-            # 3. OTE ★★★★
+            # 2b. 1st Presented FVG ★★★★★
+            if not entry_zone and first_fvg and first_fvg.get("type") == "BEARISH_FVG":
+                if first_fvg["bottom"] <= current <= first_fvg["top"]:
+                    entry_zone, setup_name, model_name, stars = \
+                        first_fvg, "1st Presented SIBI", "SILVER_BULLET", 5
+                    confs.append(f"1st SIBI: displacement sonrası ilk FVG")
+
+            # 3. BPR ★★★★
+            if not entry_zone:
+                for bpr in reversed(bprs):
+                    if bpr["bottom"] <= current <= bpr["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            bpr, "BPR Bearish", "OTE", 4
+                        confs.append(f"BPR: BISI+SIBI çakışma bölgesi")
+                        break
+
+            # 4. OTE ★★★★
             if not entry_zone and ote and ote.get("direction") == "BEARISH":
                 if ote["bottom"] <= current <= ote["top"]:
                     entry_zone, setup_name, model_name, stars = \
                         ote, "OTE 62-79% Fib", "OTE", 4
                     confs.append(f"OTE: {round(ote['bottom'],4)}-{round(ote['top'],4)}")
 
-            # 4. IFVG ★★★
+            # 5. IFVG ★★★
             if not entry_zone:
                 for ifvg in reversed(ifvgs):
                     if ifvg["type"] == "BEARISH_IFVG" and ifvg["bottom"] <= current <= ifvg["top"]:
@@ -1018,7 +1266,7 @@ class ICTAnalyzer:
                         confs.append("Bearish IFVG (Ters FVG direnç)")
                         break
 
-            # 5. Bearish Breaker ★★★
+            # 6. Bearish Breaker ★★★
             if not entry_zone:
                 for b in reversed(breakers):
                     if b["type"] == "BEARISH_BREAKER" and b["bottom"] <= current <= b["top"]:
@@ -1027,15 +1275,24 @@ class ICTAnalyzer:
                         confs.append("Bearish Breaker Block")
                         break
 
-            # 6. FVG ★★
+            # 7. Rejection Block ★★★
+            if not entry_zone:
+                for rb in reversed(rej_blks):
+                    if rb["type"] == "BEARISH_REJECTION" and rb["bottom"] <= current <= rb["top"]:
+                        entry_zone, setup_name, model_name, stars = \
+                            rb, f"Bearish Rejection Block (wick {rb['wick_ratio']}x)", "OB_FVG", 3
+                        confs.append(f"Rejection Block: {rb['wick_ratio']}x fitil")
+                        break
+
+            # 8. FVG (SIBI) ★★
             if not entry_zone:
                 for fvg in reversed(fvgs):
                     if fvg["type"] == "BEARISH_FVG" and fvg["bottom"] <= current <= fvg["top"]:
-                        entry_zone, setup_name, model_name = fvg, "Bearish FVG", "OB_FVG"
-                        confs.append("Bearish FVG")
+                        entry_zone, setup_name, model_name = fvg, "Bearish SIBI", "OB_FVG"
+                        confs.append(f"SIBI CE: {round(fvg['midpoint'],4)}")
                         break
 
-            # 7. Order Block ★★
+            # 9. Order Block ★★
             if not entry_zone:
                 for ob in reversed(obs):
                     if ob["type"] == "BEARISH_OB" and ob["bottom"] <= current <= ob["top"]:
@@ -1054,6 +1311,18 @@ class ICTAnalyzer:
                 if ipda_dn:
                     tp2 = ipda_dn[0]
                     confs.append(f"IPDA hedef: {round(tp2,4)}")
+
+                # NDOG hedef (BUG FIX)
+                ndog_dn = sorted([nd["midpoint"] for nd in opening_gaps.get("ndog",[])
+                                  if nd["midpoint"] < current and nd["direction"] == "BEARISH"], reverse=True)
+                if ndog_dn:
+                    tp1 = ndog_dn[0]
+                    confs.append(f"NDOG CE hedef: {round(tp1,4)}")
+
+                nwog = opening_gaps.get("nwog")
+                if nwog and nwog["midpoint"] < current:
+                    tp2 = nwog["midpoint"]
+                    confs.append(f"NWOG CE hedef: {round(tp2,4)}")
 
                 # ICT Macro penceresi bonus
                 if macro_win:
@@ -1086,6 +1355,10 @@ class ICTAnalyzer:
 
                 if q3_warning:
                     confs.append("⚠️ Q3 — düşük güven sezonu, pozisyon küçük tut")
+                    stars = max(stars - 1, 1)
+
+                if low_prob_day:
+                    confs.append(f"⚠️ {weekly_prof['day']}: {weekly_prof['note']}")
                     stars = max(stars - 1, 1)
 
                 risk   = sl - current
