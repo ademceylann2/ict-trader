@@ -1145,6 +1145,120 @@ class ICTAnalyzer:
         return levels
 
     # ══════════════════════════════════════════════════════════════════════
+    # NY MIDNIGHT OPEN — 00:00 NY (ICT True Daily Bias Reference)
+    # Price above MO = bullish day bias; below = bearish day bias.
+    # MO also acts as intraday S/R — price often returns to it during NY.
+    # ══════════════════════════════════════════════════════════════════════
+    def find_midnight_open(self, df: pd.DataFrame) -> dict:
+        """
+        NY Midnight Open: open price at 00:00 ET.
+        Above MO = bullish day bias. Below = bearish.
+        NY Midnight Range = 00:00-03:00 ET (2022 model Judas reference).
+        """
+        if len(df) < 4:
+            return {}
+
+        df_et = df.copy()
+        try:
+            df_et.index = pd.to_datetime(df_et.index, utc=True).tz_convert(self._et)
+        except Exception:
+            return {}
+
+        today = df_et.index[-1].date()
+
+        # Midnight open (00:00 NY candle)
+        midnight_candles = df_et[
+            (df_et.index.date == today) & (df_et.index.hour == 0) & (df_et.index.minute == 0)
+        ]
+        if midnight_candles.empty:
+            # Fallback: first candle of today
+            today_candles = df_et[df_et.index.date == today]
+            if today_candles.empty:
+                return {}
+            midnight_open = today_candles.iloc[0]["Open"]
+        else:
+            midnight_open = midnight_candles.iloc[0]["Open"]
+
+        # NY Midnight Range (00:00-03:00 ET) — 2022 model Judas reference
+        midnight_range = df_et[
+            (df_et.index.date == today) &
+            (df_et.index.hour >= 0) & (df_et.index.hour < 3)
+        ]
+
+        current = df["Close"].iloc[-1]
+        result  = {
+            "midnight_open": midnight_open,
+            "bias": "BULLISH" if current > midnight_open else "BEARISH",
+            "desc": (f"Price {'above' if current > midnight_open else 'below'} "
+                     f"Midnight Open {round(midnight_open,4)}"),
+        }
+
+        if not midnight_range.empty:
+            mr_high = midnight_range["High"].max()
+            mr_low  = midnight_range["Low"].min()
+            # Judas sweep detection (2022 model)
+            last3_high = df["High"].iloc[-3:].max()
+            last3_low  = df["Low"].iloc[-3:].min()
+            swept_high = last3_high > mr_high and current < mr_high
+            swept_low  = last3_low  < mr_low  and current > mr_low
+            result.update({
+                "mr_high":      mr_high,
+                "mr_low":       mr_low,
+                "mr_midpoint":  (mr_high + mr_low) / 2,
+                "swept_high":   swept_high,
+                "swept_low":    swept_low,
+                "judas_dir":    ("BEARISH" if swept_high else "BULLISH" if swept_low else "NONE"),
+            })
+
+        return result
+
+    # ══════════════════════════════════════════════════════════════════════
+    # WEEKLY OPEN — Sunday 18:00 ET (ICT Weekly Bias Reference)
+    # Price above WO all week = bullish; below = bearish.
+    # Monday typically forms weekly high (bearish week) or low (bullish week).
+    # ══════════════════════════════════════════════════════════════════════
+    def find_weekly_open(self, df: pd.DataFrame) -> dict:
+        """
+        Weekly Open: First candle Sunday 18:00 ET (or Monday 00:00 if gap).
+        WO above current price = discount (buy zone).
+        WO below current price = premium (sell zone).
+        """
+        if len(df) < 5:
+            return {}
+
+        df_et = df.copy()
+        try:
+            df_et.index = pd.to_datetime(df_et.index, utc=True).tz_convert(self._et)
+        except Exception:
+            return {}
+
+        current = df["Close"].iloc[-1]
+
+        # Find most recent Sunday 18:00 or Monday first candle
+        sundays = df_et[df_et.index.weekday == 6]  # 6 = Sunday
+        mondays = df_et[df_et.index.weekday == 0]  # 0 = Monday
+
+        weekly_open = None
+        if not sundays.empty:
+            sun_eve = sundays[sundays.index.hour >= 18]
+            if not sun_eve.empty:
+                weekly_open = sun_eve.iloc[-1]["Open"]
+        if weekly_open is None and not mondays.empty:
+            weekly_open = mondays.iloc[-1]["Open"]
+
+        if weekly_open is None:
+            return {}
+
+        above_wo = current > weekly_open
+        return {
+            "weekly_open":  weekly_open,
+            "bias":         "BULLISH" if above_wo else "BEARISH",
+            "zone":         "PREMIUM" if above_wo else "DISCOUNT",
+            "desc":         (f"Price {'above' if above_wo else 'below'} "
+                             f"Weekly Open {round(weekly_open,4)}"),
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
     # PREMIUM / DISCOUNT
     # ══════════════════════════════════════════════════════════════════════
     def get_premium_discount(self, df: pd.DataFrame, lookback: int = 50) -> dict:
@@ -1500,6 +1614,8 @@ class ICTAnalyzer:
         mm_phase     = self.detect_mm_model_phase(df_htf, df_mtf, bias)
         asian_range  = self.find_asian_range(df_mtf)
         swing_hier   = self.classify_swing_hierarchy(df_htf)
+        midnight_ref = self.find_midnight_open(df_htf)
+        weekly_ref   = self.find_weekly_open(df_htf)
 
         # NDOG/NWOG seviyeleri
         opening_gaps = self.find_opening_gaps(df_htf) if len(df_htf) >= 48 else {}
@@ -1550,6 +1666,14 @@ class ICTAnalyzer:
             base.append(f"Venom: {venom['desc']}")
         if first_fvg:
             base.append(f"1st FVG ({first_fvg['label']}): {round(first_fvg['bottom'],4)}-{round(first_fvg['top'],4)}")
+        # Midnight Open & Weekly Open bağlamı
+        if midnight_ref.get("midnight_open"):
+            base.append(f"Midnight Open: {round(midnight_ref['midnight_open'],4)} ({midnight_ref['bias']})")
+        if midnight_ref.get("judas_dir") and midnight_ref["judas_dir"] != "NONE":
+            base.append(f"★ 2022 Judas Sweep: {midnight_ref['judas_dir']} (MR sweep)")
+        if weekly_ref.get("weekly_open"):
+            base.append(f"Weekly Open: {round(weekly_ref['weekly_open'],4)} ({weekly_ref['bias']})")
+
         # CISD — erken dönüş sinyali
         if cisd.get("found"):
             base.append(f"CISD: {cisd['desc']}")
@@ -1743,6 +1867,11 @@ class ICTAnalyzer:
                 if adr and adr.get("proj_high", 0) > current:
                     confs.append(f"ADR Yüksek: {adr['proj_high']}")
 
+                # 2022 model: MR High hedef (Judas sweep sonrası)
+                if midnight_ref.get("judas_dir") == "BULLISH" and midnight_ref.get("mr_high", 0) > current:
+                    tp1 = midnight_ref["mr_high"]
+                    confs.append(f"2022 MR High hedef: {round(tp1,4)}")
+
                 # ICT Macro penceresi bonus
                 if macro_win:
                     stars = min(stars + 1, 5)
@@ -1776,6 +1905,19 @@ class ICTAnalyzer:
                 if inducement.get("found") and inducement.get("direction") == "BULLISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası long ✓")
+
+                # Midnight Open bullish alignment (+1 yıldız)
+                if midnight_ref.get("bias") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Midnight Open Bullish: fiyat MO üzerinde ✓")
+                # 2022 Judas Sweep MR Low → Bullish (+1 yıldız)
+                if midnight_ref.get("judas_dir") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"2022 Judas: MR Low sweep → bullish ✓")
+                # Weekly Open bias alignment (+1 yıldız)
+                if weekly_ref.get("bias") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Weekly Open Bullish: fiyat WO üzerinde ✓")
 
                 # CISD bullish onay (+1 yıldız — erken dönüş teyidi)
                 if cisd.get("found") and cisd.get("direction") == "BULLISH":
@@ -1977,6 +2119,11 @@ class ICTAnalyzer:
                 if adr and adr.get("proj_low", float("inf")) < current:
                     confs.append(f"ADR Düşük: {adr['proj_low']}")
 
+                # 2022 model: MR Low hedef (Judas sweep sonrası)
+                if midnight_ref.get("judas_dir") == "BEARISH" and midnight_ref.get("mr_low", float("inf")) < current:
+                    tp1 = midnight_ref["mr_low"]
+                    confs.append(f"2022 MR Low hedef: {round(tp1,4)}")
+
                 # ICT Macro penceresi bonus
                 if macro_win:
                     stars = min(stars + 1, 5)
@@ -2005,6 +2152,19 @@ class ICTAnalyzer:
                 if inducement.get("found") and inducement.get("direction") == "BEARISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası short ✓")
+
+                # Midnight Open bearish alignment (+1 yıldız)
+                if midnight_ref.get("bias") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Midnight Open Bearish: fiyat MO altında ✓")
+                # 2022 Judas Sweep MR High → Bearish (+1 yıldız)
+                if midnight_ref.get("judas_dir") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"2022 Judas: MR High sweep → bearish ✓")
+                # Weekly Open bias alignment (+1 yıldız)
+                if weekly_ref.get("bias") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Weekly Open Bearish: fiyat WO altında ✓")
 
                 # CISD bearish onay (+1 yıldız)
                 if cisd.get("found") and cisd.get("direction") == "BEARISH":
