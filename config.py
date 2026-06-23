@@ -7,7 +7,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7634663263")
 # Takip edilecek semboller
 SYMBOLS = {
     "forex": ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "GC=F"],  # GC=F = Altın futures
-    "crypto": ["BTC-USD", "ETH-USD"],
+    "crypto": ["ETH-USD"],
     "indices": ["ES=F", "NQ=F"],  # S&P500 ve Nasdaq futures
 }
 

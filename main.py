@@ -37,9 +37,12 @@ SMT_PAIRS = {
     "GBPUSD=X": "EURUSD=X",
     "ES=F":     "NQ=F",
     "NQ=F":     "ES=F",
-    "BTC-USD":  "ETH-USD",
     "ETH-USD":  "BTC-USD",
+    "GC=F":     "SI=F",    # Altın vs Gümüş SMT
 }
+
+# Crypto için minimum ★5 — ETH için geçerli
+CRYPTO_SYMBOLS = {"ETH-USD"}
 
 
 def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
