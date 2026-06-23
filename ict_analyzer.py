@@ -1,11 +1,13 @@
 """
-ICT Analyzer v3 — Inner Circle Trader tam metodoloji implementasyonu.
+ICT Analyzer v4 — Inner Circle Trader tam metodoloji implementasyonu.
 
 Öğrenilen kavramlar (ICT'nin ücretsiz YouTube/mentorship materyallerinden):
   Power of 3 / AMD, Market Structure (BOS/CHOCH), FVG, IFVG,
   Order Blocks, Breaker Blocks, Unicorn Model, OTE (62-79% Fib),
   Silver Bullet, IPDA (20/40/60d), SMT Divergence, MMXM Model,
-  Judas Swing, Quarterly Theory, Draw on Liquidity (DOL)
+  Judas Swing, Quarterly Theory, Draw on Liquidity (DOL),
+  Displacement (impulsif mum), Session H/L Sweep (stop hunt),
+  Turtle Soup (eşit high/low tuzağı), PD Array seçimi
 """
 
 import pandas as pd
@@ -378,6 +380,149 @@ class ICTAnalyzer:
         return liq
 
     # ══════════════════════════════════════════════════════════════════════
+    # DISPLACEMENT — Büyük impulsif mum (ATR'nin 1.5x üstü)
+    # ICT: FVG içeren güçlü mum = giriş onayı
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_displacement(self, df: pd.DataFrame, lookback: int = 20) -> dict:
+        """
+        Displacement: Gövdesi ATR ortalamasının 1.5x üstünde olan mum.
+        FVG bırakıyorsa güçlü giriş sinyali.
+        """
+        if len(df) < lookback + 3:
+            return {"found": False}
+
+        bodies   = (df["Close"] - df["Open"]).abs()
+        atr      = bodies.rolling(lookback).mean()
+        recent   = df.tail(6)
+        atr_val  = atr.iloc[-1]
+
+        for i in range(1, len(recent) - 1):
+            body = abs(recent["Close"].iloc[i] - recent["Open"].iloc[i])
+            if body < atr_val * 1.5:
+                continue
+            bull_disp = recent["Close"].iloc[i] > recent["Open"].iloc[i]
+            bear_disp = recent["Close"].iloc[i] < recent["Open"].iloc[i]
+
+            # Displacement + FVG kontrolü (3 mumlu boşluk)
+            if i > 0 and i < len(recent) - 1:
+                prev_h = recent["High"].iloc[i-1]
+                next_l = recent["Low"].iloc[i+1]
+                prev_l = recent["Low"].iloc[i-1]
+                next_h = recent["High"].iloc[i+1]
+
+                if bull_disp and prev_h < next_l:
+                    return {"found": True, "direction": "BULLISH",
+                            "body": body, "atr": atr_val,
+                            "fvg_top": next_l, "fvg_bottom": prev_h,
+                            "candle_time": recent.index[i]}
+                if bear_disp and prev_l > next_h:
+                    return {"found": True, "direction": "BEARISH",
+                            "body": body, "atr": atr_val,
+                            "fvg_top": prev_l, "fvg_bottom": next_h,
+                            "candle_time": recent.index[i]}
+        return {"found": False}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SESSION HIGH/LOW SWEEP — Asia/London high-low likidite avı
+    # ICT: Önceki session'ın high veya low'unu tararsa → ters yön hazır
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_session_sweep(self, df: pd.DataFrame) -> dict:
+        """
+        Son 3 saatteki fiyat Asia/London session H/L'yi aşıp dönüyorsa
+        bu bir stop hunt — karşı yönde giriş fırsatı.
+        """
+        if len(df) < 24:
+            return {"sweep": False}
+
+        df_utc = df.copy()
+        if not hasattr(df_utc.index, 'hour'):
+            df_utc.index = pd.to_datetime(df_utc.index, utc=True)
+
+        today = df_utc.index[-1].date()
+
+        asia   = df_utc[(df_utc.index.date == today) & (df_utc.index.hour < 7)]
+        london = df_utc[(df_utc.index.date == today) &
+                        (df_utc.index.hour >= 7) & (df_utc.index.hour < 12)]
+
+        current = df_utc["Close"].iloc[-1]
+        last2   = df_utc.tail(3)
+
+        results = {}
+
+        if not asia.empty:
+            ah = asia["High"].max()
+            al = asia["Low"].min()
+            # Asia high sweep + geri dönüş
+            if last2["High"].max() > ah and current < ah:
+                results = {"sweep": True, "type": "ASIA_HIGH_SWEEP",
+                           "level": ah, "direction": "BEARISH",
+                           "desc": f"Asia High ({round(ah,4)}) sweep → short"}
+            elif last2["Low"].min() < al and current > al:
+                results = {"sweep": True, "type": "ASIA_LOW_SWEEP",
+                           "level": al, "direction": "BULLISH",
+                           "desc": f"Asia Low ({round(al,4)}) sweep → long"}
+
+        if not results.get("sweep") and not london.empty:
+            lh = london["High"].max()
+            ll = london["Low"].min()
+            if last2["High"].max() > lh and current < lh:
+                results = {"sweep": True, "type": "LONDON_HIGH_SWEEP",
+                           "level": lh, "direction": "BEARISH",
+                           "desc": f"London High ({round(lh,4)}) sweep → short"}
+            elif last2["Low"].min() < ll and current > ll:
+                results = {"sweep": True, "type": "LONDON_LOW_SWEEP",
+                           "level": ll, "direction": "BULLISH",
+                           "desc": f"London Low ({round(ll,4)}) sweep → long"}
+
+        return results if results else {"sweep": False}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TURTLE SOUP — Eşit high/low tuzağı (equal highs/lows sweep)
+    # ICT: EQH/EQL likidite havuzları kırılınca karşı yön
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_turtle_soup(self, df: pd.DataFrame, tolerance: float = 0.0003,
+                            lookback: int = 30) -> dict:
+        """
+        Son `lookback` mum içinde birden fazla high/low aynı seviyedeyse
+        (tolerance içinde) → EQH veya EQL var.
+        Fiyat bu seviyeyi aşıp geri dönüyorsa Turtle Soup sinyali.
+        """
+        if len(df) < lookback + 3:
+            return {"found": False}
+
+        recent  = df.tail(lookback)
+        current = df["Close"].iloc[-1]
+        last3   = df.tail(3)
+
+        highs = recent["High"].values
+        lows  = recent["Low"].values
+
+        def find_eq(arr, tol):
+            clusters = []
+            for i in range(len(arr) - 1):
+                for j in range(i+1, len(arr)):
+                    if abs(arr[i] - arr[j]) / arr[i] < tol:
+                        clusters.append((arr[i] + arr[j]) / 2)
+            return clusters
+
+        eq_highs = find_eq(highs[:-3], tolerance)
+        eq_lows  = find_eq(lows[:-3],  tolerance)
+
+        for eqh in eq_highs:
+            if last3["High"].max() > eqh * (1 + tolerance) and current < eqh:
+                return {"found": True, "type": "EQH_SWEEP", "level": eqh,
+                        "direction": "BEARISH",
+                        "desc": f"EQH ({round(eqh,4)}) Turtle Soup → short"}
+
+        for eql in eq_lows:
+            if last3["Low"].min() < eql * (1 - tolerance) and current > eql:
+                return {"found": True, "type": "EQL_SWEEP", "level": eql,
+                        "direction": "BULLISH",
+                        "desc": f"EQL ({round(eql,4)}) Turtle Soup → long"}
+
+        return {"found": False}
+
+    # ══════════════════════════════════════════════════════════════════════
     # PREMIUM / DISCOUNT
     # ══════════════════════════════════════════════════════════════════════
     def get_premium_discount(self, df: pd.DataFrame, lookback: int = 50) -> dict:
@@ -423,11 +568,14 @@ class ICTAnalyzer:
         ote      = self.find_ote(df_htf, bias)
 
         # Ek bağlam
-        sb_window = self.is_silver_bullet_window()
-        judas     = self.detect_judas_swing(df_mtf, bias)
-        amd_phase = self.detect_amd_phase(df_htf)
-        q_theory  = self.quarterly_bias()
-        mmxm      = self.detect_mmxm_phase(df_htf, bias)
+        sb_window    = self.is_silver_bullet_window()
+        judas        = self.detect_judas_swing(df_mtf, bias)
+        amd_phase    = self.detect_amd_phase(df_htf)
+        q_theory     = self.quarterly_bias()
+        mmxm         = self.detect_mmxm_phase(df_htf, bias)
+        displacement = self.detect_displacement(df_mtf)
+        sess_sweep   = self.detect_session_sweep(df_mtf)
+        turtle       = self.detect_turtle_soup(df_mtf)
 
         # IPDA
         ipda = {}
@@ -451,6 +599,13 @@ class ICTAnalyzer:
             base.append(f"MMXM: {mmxm}")
         if smt != "NONE":
             base.append(f"SMT Divergence: {smt}")
+        if displacement.get("found"):
+            base.append(f"Displacement: {displacement['direction']} "
+                        f"(gövde {round(displacement['body']/displacement['atr'],1)}x ATR)")
+        if sess_sweep.get("sweep"):
+            base.append(f"Session Sweep: {sess_sweep['desc']}")
+        if turtle.get("found"):
+            base.append(f"Turtle Soup: {turtle['desc']}")
 
         q3_warning = q_theory["quarter"] == "Q3"  # Q3 düşük güven
 
@@ -541,6 +696,19 @@ class ICTAnalyzer:
                 if smt == "BULLISH_SMT":
                     stars = min(stars + 1, 5)
                     confs.append("SMT Divergence: Bullish onay ✓")
+
+                # Displacement onayı
+                if displacement.get("found") and displacement.get("direction") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append("Displacement Bullish ✓")
+
+                # Session sweep / Turtle Soup bullish onay
+                if sess_sweep.get("sweep") and sess_sweep.get("direction") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Stop Hunt Bullish: {sess_sweep['type']} ✓")
+                if turtle.get("found") and turtle.get("direction") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Turtle Soup Bullish ✓")
 
                 # Q3 uyarısı
                 if q3_warning:
@@ -642,6 +810,17 @@ class ICTAnalyzer:
                 if smt == "BEARISH_SMT":
                     stars = min(stars + 1, 5)
                     confs.append("SMT Divergence: Bearish onay ✓")
+
+                if displacement.get("found") and displacement.get("direction") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append("Displacement Bearish ✓")
+
+                if sess_sweep.get("sweep") and sess_sweep.get("direction") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Stop Hunt Bearish: {sess_sweep['type']} ✓")
+                if turtle.get("found") and turtle.get("direction") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Turtle Soup Bearish ✓")
 
                 if q3_warning:
                     confs.append("⚠️ Q3 — düşük güven sezonu, pozisyon küçük tut")

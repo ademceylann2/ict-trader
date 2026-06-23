@@ -16,8 +16,9 @@ from executor import execute_signal as alpaca_execute, get_account_info as alpac
 from executor_oanda import execute_signal as oanda_execute, get_account_info as oanda_account, OANDA_TOKEN
 from executor_capital import execute_signal as capital_execute, get_account_info as capital_account, CAPITAL_API_KEY
 
-SCAN_INTERVAL = 300
-sent_signals  = set()
+SCAN_INTERVAL  = 300
+SIGNAL_TTL_SEC = 4 * 3600   # aynı sinyal 4 saat içinde tekrar gönderilmez
+sent_signals: dict = {}      # sig_key → timestamp
 
 # ── Backtest filtreleri ──────────────────────────────────────────────────────
 # NY Close tüm sembollerde %0 win rate → tamamen kapat
@@ -87,7 +88,13 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
             print(f"  [{symbol}] OB_FVG ★{signal.confidence} yeterli değil, atlanıyor")
             return
 
-        sig_key = f"{signal.symbol}_{signal.direction}_{signal.entry}"
+        sig_key = f"{signal.symbol}_{signal.direction}_{signal.model}"
+        now_ts  = time.time()
+        # Eski sinyalleri temizle
+        expired = [k for k, t in sent_signals.items() if now_ts - t > SIGNAL_TTL_SEC]
+        for k in expired:
+            del sent_signals[k]
+
         if sig_key not in sent_signals:
             stars = "★" * signal.confidence + "☆" * (5 - signal.confidence)
             print(f"  [{symbol}] ✅ {signal.model} {signal.direction} @ {signal.entry} [{stars}]")
@@ -99,7 +106,7 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
                 oanda_execute(signal)
             elif ALPACA_API_KEY:
                 alpaca_execute(signal)
-            sent_signals.add(sig_key)
+            sent_signals[sig_key] = now_ts
     else:
         print(f"  [{symbol}] Kurulum yok.")
 
