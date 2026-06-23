@@ -816,14 +816,104 @@ class ICTAnalyzer:
         return {"found": False}
 
     # ══════════════════════════════════════════════════════════════════════
-    # SILVER BULLET — 3AM / 10AM / 2PM NY pencereleri (1 saatlik)
+    # SILVER BULLET — 3AM / 8:30AM / 10AM / 2PM NY (ICT 2022/2024)
+    # 08:30 = US economic release window, ICT 2024 Lecture 1 key model
     # ══════════════════════════════════════════════════════════════════════
     def is_silver_bullet_window(self) -> str:
-        h = datetime.now(self._et).hour
+        now_et = datetime.now(self._et)
+        h, m   = now_et.hour, now_et.minute
         if h == 3:  return "silver_bullet_3am"
+        if h == 8 and m >= 30: return "silver_bullet_8:30am"   # 2024 model
+        if h == 9 and m < 30:  return "silver_bullet_8:30am"   # 08:30-09:30 window
         if h == 10: return "silver_bullet_10am"
         if h == 14: return "silver_bullet_2pm"
         return ""
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ICT INTRADAY PROFILES — 4 types (ICT 2017 Month 8 + 2022)
+    # CBDR < 40 pips filter, Asian range 20-30 pips.
+    # Normal: protraction 12:00-02:00 AM ET
+    # Delayed: protraction 02:00+ AM ET (IPDA protraction stage)
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_intraday_profile(self, df_1h: pd.DataFrame) -> dict:
+        """
+        Classify today's intraday profile:
+        London Normal Buy/Sell: CBDR < 40p, Asian 20-30p, early move before 02:00
+        London Delayed Buy/Sell: same filters but move after 02:00 ET
+        """
+        if len(df_1h) < 24:
+            return {"profile": "UNKNOWN"}
+
+        df_et = df_1h.copy()
+        try:
+            df_et.index = pd.to_datetime(df_et.index, utc=True).tz_convert(self._et)
+        except Exception:
+            return {"profile": "UNKNOWN"}
+
+        today = df_et.index[-1].date()
+        current = df_1h["Close"].iloc[-1]
+
+        # CBDR range (14:00-20:00 ET yesterday)
+        cbdr = self.calculate_cbdr(df_1h)
+        cbdr_range_pct = cbdr.get("range", 0) / current if cbdr else 0
+        cbdr_ok = cbdr_range_pct < 0.004   # ~40 pips equivalent for most instruments
+
+        # Asian range (19:00-01:00 ET = midnight session)
+        asian_df = df_et[
+            (df_et.index.date == today) & (df_et.index.hour < 1)
+        ]
+        if asian_df.empty:
+            asian_range_pct = 0
+        else:
+            arange = asian_df["High"].max() - asian_df["Low"].min()
+            asian_range_pct = arange / current
+        asian_ok = 0.001 < asian_range_pct < 0.005   # 20-30p equivalent
+
+        # London open period (00:00-02:00 ET) — did price move?
+        london_early = df_et[
+            (df_et.index.date == today) &
+            (df_et.index.hour >= 0) & (df_et.index.hour < 2)
+        ]
+        london_late = df_et[
+            (df_et.index.date == today) &
+            (df_et.index.hour >= 2) & (df_et.index.hour < 7)
+        ]
+
+        bias = self.detect_market_structure(df_1h)
+        is_bullish = bias in ("BULLISH", "CHOCH_BULLISH")
+
+        if not cbdr_ok or not asian_ok:
+            return {
+                "profile": "UNCLASSIFIED",
+                "cbdr_ok": cbdr_ok, "asian_ok": asian_ok,
+                "desc": "CBDR veya Asian range profil filtrelerine uymuyor",
+            }
+
+        # Check if significant move happened in early London (00-02 ET)
+        if not london_early.empty:
+            early_move = london_early["High"].max() - london_early["Low"].min()
+            if early_move / current > 0.002:   # meaningful protraction
+                profile_type = "NORMAL"
+                profile = f"London Normal {'Buy' if is_bullish else 'Sell'}"
+            elif not london_late.empty:
+                profile_type = "DELAYED"
+                profile = f"London Delayed {'Buy' if is_bullish else 'Sell'}"
+            else:
+                return {"profile": "FORMING"}
+        else:
+            return {"profile": "FORMING"}
+
+        return {
+            "profile":      profile,
+            "type":         profile_type,
+            "direction":    "BULLISH" if is_bullish else "BEARISH",
+            "cbdr_ok":      cbdr_ok,
+            "asian_ok":     asian_ok,
+            "desc": (
+                f"{profile}: CBDR✓ Asian✓ "
+                f"{'Erken protraksiyon' if profile_type=='NORMAL' else 'IPDA gecikmeli protraksiyon'}"
+            ),
+        }
 
     # ══════════════════════════════════════════════════════════════════════
     # JUDAS SWING — Sahte hareket tespiti
@@ -1712,8 +1802,9 @@ class ICTAnalyzer:
         mm_phase     = self.detect_mm_model_phase(df_htf, df_mtf, bias)
         asian_range  = self.find_asian_range(df_mtf)
         swing_hier   = self.classify_swing_hierarchy(df_htf)
-        midnight_ref = self.find_midnight_open(df_htf)
-        weekly_ref   = self.find_weekly_open(df_htf)
+        midnight_ref  = self.find_midnight_open(df_htf)
+        weekly_ref    = self.find_weekly_open(df_htf)
+        intraday_prof = self.detect_intraday_profile(df_htf)
 
         # NDOG/NWOG seviyeleri
         opening_gaps = self.find_opening_gaps(df_htf) if len(df_htf) >= 48 else {}
@@ -1741,6 +1832,8 @@ class ICTAnalyzer:
             base.append(f"⭐ ICT Macro: {macro_win}")
         if sb_window:
             base.append(f"Silver Bullet: {sb_window}")
+        if intraday_prof.get("profile") not in ("UNKNOWN", "UNCLASSIFIED", "FORMING", None):
+            base.append(f"Intraday Profil: {intraday_prof['desc']}")
         if judas:
             base.append("Judas Swing onayı")
         if amd_phase in ("MANIPULATION", "DISTRIBUTION"):
@@ -2020,6 +2113,12 @@ class ICTAnalyzer:
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası long ✓")
 
+                # Intraday Profile alignment (+1 yıldız)
+                if intraday_prof.get("direction") == "BULLISH" and \
+                   intraday_prof.get("profile") not in ("UNKNOWN", "UNCLASSIFIED", "FORMING", None):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Intraday Profil Bullish: {intraday_prof['profile']} ✓")
+
                 # Midnight Open bullish alignment (+1 yıldız)
                 if midnight_ref.get("bias") == "BULLISH":
                     stars = min(stars + 1, 5)
@@ -2281,6 +2380,12 @@ class ICTAnalyzer:
                 if inducement.get("found") and inducement.get("direction") == "BEARISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"IDM tuzağı sonrası short ✓")
+
+                # Intraday Profile alignment (+1 yıldız)
+                if intraday_prof.get("direction") == "BEARISH" and \
+                   intraday_prof.get("profile") not in ("UNKNOWN", "UNCLASSIFIED", "FORMING", None):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"Intraday Profil Bearish: {intraday_prof['profile']} ✓")
 
                 # Midnight Open bearish alignment (+1 yıldız)
                 if midnight_ref.get("bias") == "BEARISH":
