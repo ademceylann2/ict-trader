@@ -1,13 +1,13 @@
 """
-ICT Analyzer v4 — Inner Circle Trader tam metodoloji implementasyonu.
+ICT Analyzer v5 — Inner Circle Trader TAM metodoloji (YouTube 2024 Mentorship).
 
-Öğrenilen kavramlar (ICT'nin ücretsiz YouTube/mentorship materyallerinden):
-  Power of 3 / AMD, Market Structure (BOS/CHOCH), FVG, IFVG,
-  Order Blocks, Breaker Blocks, Unicorn Model, OTE (62-79% Fib),
-  Silver Bullet, IPDA (20/40/60d), SMT Divergence, MMXM Model,
-  Judas Swing, Quarterly Theory, Draw on Liquidity (DOL),
-  Displacement (impulsif mum), Session H/L Sweep (stop hunt),
-  Turtle Soup (eşit high/low tuzağı), PD Array seçimi
+Kavramlar:
+  Temel: BOS/CHOCH/MSS, FVG (BISI/SIBI), IFVG, Order Blocks, Breaker Blocks
+  Modeller: Unicorn, OTE (62-79%), Silver Bullet, MMXM, AMD/Power of 3
+  Zaman: Kill Zones, ICT Macros (8 pencere), NDOG, NWOG
+  Gelişmiş: SMT Divergence, IPDA, Judas Swing, Quarterly Theory,
+             Displacement, Session Sweep, Turtle Soup, CRT,
+             Weekly Profiles, Inducement (IDM), Consequent Encroachment
 """
 
 import pandas as pd
@@ -335,7 +335,223 @@ class ICTAnalyzer:
         return "RANGING"
 
     # ══════════════════════════════════════════════════════════════════════
-    # SILVER BULLET — 3AM / 10AM / 2PM NY pencereleri
+    # BISI / SIBI — FVG yön sınıflandırması (ICT 2024)
+    # BISI = Up-closed FVG (bullish), SIBI = Down-closed FVG (bearish)
+    # ══════════════════════════════════════════════════════════════════════
+    def find_fvg_classified(self, df: pd.DataFrame, min_size_pct: float = 0.0005) -> list:
+        """find_fvg'yi BISI/SIBI etiketiyle zenginleştirir."""
+        fvgs = self.find_fvg(df, min_size_pct)
+        for f in fvgs:
+            idx = f["index"]
+            if idx < len(df):
+                mid_close = df["Close"].iloc[idx]
+                mid_open  = df["Open"].iloc[idx]
+                if f["type"] == "BULLISH_FVG":
+                    f["label"] = "BISI"  # Buy-Side Imbalance Sell-Side Inefficiency
+                else:
+                    f["label"] = "SIBI"  # Sell-Side Imbalance Buy-Side Inefficiency
+                f["consequent_encroachment"] = f["midpoint"]  # 50% seviye
+        return fvgs
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ICT MACROS — 8 kesin zaman penceresi (NY local → UTC dönüşüm)
+    # Algoritmanın en yoğun çalıştığı 20-dakikalık pencereler
+    # ══════════════════════════════════════════════════════════════════════
+    # Macro zamanları NY (Eastern) saatiyle:
+    # London M1: 02:33-03:00, London M2: 04:03-04:30
+    # NY AM M1: 08:50-09:10, NY AM M2: 09:50-10:10, NY AM M3: 10:50-11:10
+    # NY Lunch: 11:50-12:10, NY PM: 13:10-13:40, NY Last: 15:15-15:45
+    MACRO_WINDOWS_ET = [
+        ("02:33", "03:00", "London Macro 1"),
+        ("04:03", "04:30", "London Macro 2"),
+        ("08:50", "09:10", "NY AM Macro 1"),
+        ("09:50", "10:10", "NY AM Macro 2 ⭐"),   # En güçlü pencere
+        ("10:50", "11:10", "NY AM Macro 3"),
+        ("11:50", "12:10", "NY Lunch Macro"),
+        ("13:10", "13:40", "NY PM Macro"),
+        ("15:15", "15:45", "NY Last Hour Macro"),
+    ]
+
+    def is_ict_macro_window(self) -> str:
+        """Şu an ICT Macro penceresi içindeyiz mi? Pencere adını döndür."""
+        now_et = datetime.now(self._et).strftime("%H:%M")
+        for start, end, name in self.MACRO_WINDOWS_ET:
+            if start <= now_et <= end:
+                return name
+        return ""
+
+    # ══════════════════════════════════════════════════════════════════════
+    # NDOG / NWOG — Günlük & Haftalık Açılış Boşlukları
+    # NDOG: 17:00-18:00 NY arası boşluk (her gün)
+    # NWOG: Cuma 17:00 - Pazartesi 18:00 NY arası boşluk
+    # ══════════════════════════════════════════════════════════════════════
+    def find_opening_gaps(self, df_1h: pd.DataFrame) -> dict:
+        """
+        NDOG: Her gün 17:00 NY kapanış ile 18:00 NY açılış arası fiyat boşluğu.
+        NWOG: Haftanın en büyük boşluğu — Cuma kapanış / Pazartesi açılış.
+        Consequent Encroachment = boşluğun tam ortası (50%).
+        """
+        if df_1h.empty or len(df_1h) < 48:
+            return {}
+
+        df = df_1h.copy()
+        df.index = pd.to_datetime(df.index, utc=True)
+        df_et = df.copy()
+        df_et.index = df_et.index.tz_convert(self._et)
+
+        gaps = {"ndog": [], "nwog": None}
+
+        # Son 5 NDOG bul
+        for i in range(1, min(len(df_et), 120)):
+            row = df_et.iloc[-i]
+            h   = df_et.index[-i].hour
+            dow = df_et.index[-i].weekday()  # 0=Mon, 4=Fri
+
+            # 17:00 NY kapanış mumu → boşluk varsa
+            if h == 17:
+                prev_close = row["Close"]
+                # 18:00 açılış
+                next_idx = -i + 1 if i > 1 else None
+                if next_idx and abs(next_idx) < len(df_et):
+                    next_open = df_et.iloc[next_idx]["Open"]
+                    if abs(next_open - prev_close) / prev_close > 0.0001:
+                        top    = max(prev_close, next_open)
+                        bottom = min(prev_close, next_open)
+                        gaps["ndog"].append({
+                            "top":    top,
+                            "bottom": bottom,
+                            "midpoint": (top + bottom) / 2,
+                            "direction": "BULLISH" if next_open > prev_close else "BEARISH",
+                            "date": df_et.index[-i].date(),
+                        })
+                        if len(gaps["ndog"]) >= 5:
+                            break
+
+        # NWOG: Cuma 17:00 vs Pazartesi 18:00
+        fridays = df_et[df_et.index.weekday == 4]
+        mondays = df_et[df_et.index.weekday == 0]
+        if not fridays.empty and not mondays.empty:
+            fri_close = fridays[fridays.index.hour == 17]
+            mon_open  = mondays[mondays.index.hour == 18]
+            if not fri_close.empty and not mon_open.empty:
+                fc = fri_close.iloc[-1]["Close"]
+                mo = mon_open.iloc[-1]["Open"]
+                if abs(mo - fc) / fc > 0.0001:
+                    top    = max(fc, mo)
+                    bottom = min(fc, mo)
+                    gaps["nwog"] = {
+                        "top":      top,
+                        "bottom":   bottom,
+                        "midpoint": (top + bottom) / 2,
+                        "direction": "BULLISH" if mo > fc else "BEARISH",
+                    }
+        return gaps
+
+    # ══════════════════════════════════════════════════════════════════════
+    # CRT — Candle Range Theory (ICT 2024)
+    # Üst TF mumun high/low'u taranıp geri dönüşse → karşı yön
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_crt(self, df_htf: pd.DataFrame, df_mtf: pd.DataFrame) -> dict:
+        """
+        CRT: Bir önceki HTF mumun high veya low'u kırılıp kapanış
+        mum aralığı içine geri dönüyorsa → sweep + reversal sinyali.
+        Entry: MSS sonrası FVG/OB'ye geri çekilmede.
+        """
+        if len(df_htf) < 3 or len(df_mtf) < 5:
+            return {"found": False}
+
+        prev_candle  = df_htf.iloc[-2]
+        crt_high     = prev_candle["High"]
+        crt_low      = prev_candle["Low"]
+        current      = df_mtf["Close"].iloc[-1]
+
+        last3_mtf_high = df_mtf["High"].iloc[-3:].max()
+        last3_mtf_low  = df_mtf["Low"].iloc[-3:].min()
+        last_close     = df_mtf["Close"].iloc[-1]
+
+        # Bearish CRT: CRT-High aşıldı ama kapanış içine döndü
+        if last3_mtf_high > crt_high and last_close < crt_high:
+            return {"found": True, "direction": "BEARISH",
+                    "crt_high": crt_high, "crt_low": crt_low,
+                    "target": crt_low,
+                    "desc": f"CRT Bearish: High ({round(crt_high,4)}) sweep → {round(crt_low,4)} hedef"}
+
+        # Bullish CRT: CRT-Low aşıldı ama kapanış içine döndü
+        if last3_mtf_low < crt_low and last_close > crt_low:
+            return {"found": True, "direction": "BULLISH",
+                    "crt_high": crt_high, "crt_low": crt_low,
+                    "target": crt_high,
+                    "desc": f"CRT Bullish: Low ({round(crt_low,4)}) sweep → {round(crt_high,4)} hedef"}
+
+        return {"found": False}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # WEEKLY PROFILE — Haftanın hangi gününde high/low oluşur?
+    # ICT: Salı/Çarşamba genellikle haftalık high/low oluşturur
+    # ══════════════════════════════════════════════════════════════════════
+    def weekly_profile_bias(self) -> dict:
+        """
+        ICT Weekly Profiles:
+        Pazartesi: Sahte hareket (manipulation), Salı/Çarşamba: Gerçek yön
+        Perşembe: Devam veya geri çekilme, Cuma: Düşük olasılık (avoid)
+        """
+        dow = datetime.now(self._et).weekday()  # 0=Mon
+        profiles = {
+            0: {"day": "Pazartesi", "bias": "MANIPULATION",
+                "note": "Sahte hareket — Salı yönünü bekle", "trade": False},
+            1: {"day": "Salı",      "bias": "EXPANSION",
+                "note": "Haftalık high/low en sık Salı oluşur", "trade": True},
+            2: {"day": "Çarşamba",  "bias": "EXPANSION",
+                "note": "Salı'da oluşmadıysa Çarşamba high/low", "trade": True},
+            3: {"day": "Perşembe",  "bias": "CONTINUATION",
+                "note": "Trend devamı veya düzeltme", "trade": True},
+            4: {"day": "Cuma",      "bias": "AVOID",
+                "note": "Friday Seek & Destroy — düşük güven", "trade": False},
+        }
+        return profiles.get(dow, {"day": "?", "bias": "NEUTRAL", "trade": True})
+
+    # ══════════════════════════════════════════════════════════════════════
+    # INDUCEMENT (IDM) — Sahte giriş noktası tespiti
+    # Gerçek hareketten önce küçük ters swing = retail tuzağı
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_inducement(self, df: pd.DataFrame, bias: str) -> dict:
+        """
+        IDM: Büyük hareketten önce küçük bir ters swing.
+        Bullish bias → küçük düşüş (retail'i short'a çekiyor) → sonra yukarı
+        Bearish bias → küçük yükseliş (retail'i long'a çekiyor) → sonra aşağı
+        """
+        if len(df) < 10:
+            return {"found": False}
+
+        recent = df.tail(10)
+        closes = recent["Close"].values
+        highs  = recent["High"].values
+        lows   = recent["Low"].values
+
+        # Son 3 mumda beklenen yönün tersi bir hareket var mı?
+        if bias in ("BULLISH", "CHOCH_BULLISH"):
+            # Son 3-5 mumda düşüş var, sonra toparlanıyor
+            mini_drop  = closes[-4] > closes[-3] > closes[-2]
+            recovering = closes[-1] > closes[-2] * 1.0003
+            if mini_drop and recovering:
+                idm_low = min(lows[-4:-1])
+                return {"found": True, "direction": "BULLISH",
+                        "idm_level": idm_low,
+                        "desc": f"IDM Bullish: Retail short tuzağı @ {round(idm_low,4)}"}
+
+        elif bias in ("BEARISH", "CHOCH_BEARISH"):
+            mini_rise  = closes[-4] < closes[-3] < closes[-2]
+            recovering = closes[-1] < closes[-2] * 0.9997
+            if mini_rise and recovering:
+                idm_high = max(highs[-4:-1])
+                return {"found": True, "direction": "BEARISH",
+                        "idm_level": idm_high,
+                        "desc": f"IDM Bearish: Retail long tuzağı @ {round(idm_high,4)}"}
+
+        return {"found": False}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SILVER BULLET — 3AM / 10AM / 2PM NY pencereleri (1 saatlik)
     # ══════════════════════════════════════════════════════════════════════
     def is_silver_bullet_window(self) -> str:
         h = datetime.now(self._et).hour
@@ -569,6 +785,7 @@ class ICTAnalyzer:
 
         # Ek bağlam
         sb_window    = self.is_silver_bullet_window()
+        macro_win    = self.is_ict_macro_window()
         judas        = self.detect_judas_swing(df_mtf, bias)
         amd_phase    = self.detect_amd_phase(df_htf)
         q_theory     = self.quarterly_bias()
@@ -576,6 +793,10 @@ class ICTAnalyzer:
         displacement = self.detect_displacement(df_mtf)
         sess_sweep   = self.detect_session_sweep(df_mtf)
         turtle       = self.detect_turtle_soup(df_mtf)
+        crt          = self.detect_crt(df_htf, df_mtf)
+        weekly_prof  = self.weekly_profile_bias()
+        inducement   = self.detect_inducement(df_mtf, bias)
+        fvgs_cls     = self.find_fvg_classified(df_mtf)
 
         # IPDA
         ipda = {}
@@ -587,8 +808,14 @@ class ICTAnalyzer:
         if df_corr is not None:
             smt = self.detect_smt_divergence(df_mtf, df_corr)
 
+        # ── Cuma / Pazartesi filtresi (Weekly Profile) ──────────────────
+        if not weekly_prof.get("trade", True):
+            return None   # Cuma & Pazartesi trade yok
+
         # ── Temel confluence listesi ──────────────────────────────────────
         base = [f"Kill Zone: {kill_zone.upper()}"]
+        if macro_win:
+            base.append(f"⭐ ICT Macro: {macro_win}")
         if sb_window:
             base.append(f"Silver Bullet: {sb_window}")
         if judas:
@@ -606,6 +833,11 @@ class ICTAnalyzer:
             base.append(f"Session Sweep: {sess_sweep['desc']}")
         if turtle.get("found"):
             base.append(f"Turtle Soup: {turtle['desc']}")
+        if crt.get("found"):
+            base.append(f"CRT: {crt['desc']}")
+        if inducement.get("found"):
+            base.append(f"IDM: {inducement['desc']}")
+        base.append(f"Hafta: {weekly_prof['day']} ({weekly_prof['bias']})")
 
         q3_warning = q_theory["quarter"] == "Q3"  # Q3 düşük güven
 
@@ -692,6 +924,11 @@ class ICTAnalyzer:
                     tp2 = ipda_up[0]
                     confs.append(f"IPDA hedef: {round(tp2,4)}")
 
+                # ICT Macro penceresi bonus
+                if macro_win:
+                    stars = min(stars + 1, 5)
+                    confs.append(f"ICT Macro penceresi: {macro_win} ✓")
+
                 # SMT ekstra onay
                 if smt == "BULLISH_SMT":
                     stars = min(stars + 1, 5)
@@ -709,6 +946,17 @@ class ICTAnalyzer:
                 if turtle.get("found") and turtle.get("direction") == "BULLISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"Turtle Soup Bullish ✓")
+
+                # CRT bullish onay
+                if crt.get("found") and crt.get("direction") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    tp1 = crt["target"]  # CRT hedef: karşı uç
+                    confs.append(f"CRT Bullish hedef: {round(tp1,4)} ✓")
+
+                # IDM onayı (tuzak sonrası giriş)
+                if inducement.get("found") and inducement.get("direction") == "BULLISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"IDM tuzağı sonrası long ✓")
 
                 # Q3 uyarısı
                 if q3_warning:
@@ -807,6 +1055,11 @@ class ICTAnalyzer:
                     tp2 = ipda_dn[0]
                     confs.append(f"IPDA hedef: {round(tp2,4)}")
 
+                # ICT Macro penceresi bonus
+                if macro_win:
+                    stars = min(stars + 1, 5)
+                    confs.append(f"ICT Macro penceresi: {macro_win} ✓")
+
                 if smt == "BEARISH_SMT":
                     stars = min(stars + 1, 5)
                     confs.append("SMT Divergence: Bearish onay ✓")
@@ -821,6 +1074,15 @@ class ICTAnalyzer:
                 if turtle.get("found") and turtle.get("direction") == "BEARISH":
                     stars = min(stars + 1, 5)
                     confs.append(f"Turtle Soup Bearish ✓")
+
+                if crt.get("found") and crt.get("direction") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    tp1 = crt["target"]
+                    confs.append(f"CRT Bearish hedef: {round(tp1,4)} ✓")
+
+                if inducement.get("found") and inducement.get("direction") == "BEARISH":
+                    stars = min(stars + 1, 5)
+                    confs.append(f"IDM tuzağı sonrası short ✓")
 
                 if q3_warning:
                     confs.append("⚠️ Q3 — düşük güven sezonu, pozisyon küçük tut")
