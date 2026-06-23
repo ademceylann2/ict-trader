@@ -18,9 +18,9 @@ CAPITAL_PASSWORD = os.environ.get("CAPITAL_PASSWORD", "")
 CAPITAL_DEMO     = os.environ.get("CAPITAL_DEMO", "true").lower() == "true"
 
 BASE_URL = (
-    "https://demo-api-capital.backend.gbcmanager.com"
+    "https://demo-api-capital.backend-capital.com"
     if CAPITAL_DEMO else
-    "https://api-capital.backend.gbcmanager.com"
+    "https://api-capital.backend-capital.com"
 )
 
 # ICT sembolü → Capital.com EPIC
