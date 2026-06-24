@@ -135,14 +135,19 @@ def execute_signal(signal: Signal) -> bool:
 
         size = calculate_size(sl_distance, balance)
 
+        # Forex gibi küçük pip değerleri için 5 ondalık basamak şart
+        # round(0.002, 2) = 0.0 → hata; round(0.002, 5) = 0.002 → OK
         order_body = {
             "epic":           epic,
             "direction":      direction,
             "size":           size,
             "guaranteedStop": False,
-            "stopDistance":   round(sl_distance, 2),   # fiyat değil mesafe
-            "profitDistance": round(tp_distance, 2),   # fiyat değil mesafe
+            "stopDistance":   round(sl_distance, 5),
+            "profitDistance": round(tp_distance, 5),
         }
+
+        print(f"[CAPITAL] Emir gönderiliyor: {epic} {direction} size={size} "
+              f"SL_dist={round(sl_distance,5)} TP_dist={round(tp_distance,5)}")
 
         resp = requests.post(
             f"{BASE_URL}/api/v1/positions",
@@ -172,7 +177,8 @@ def execute_signal(signal: Signal) -> bool:
         return True
 
     except requests.HTTPError as e:
-        err = e.response.text[:400] if e.response else str(e)
+        body = e.response.text[:400] if e.response else ""
+        err  = f"{e} | body={body}" if body else str(e)
         print(f"[CAPITAL] ❌ HTTP Hatası: {err}")
         send_telegram(f"⚠️ Capital.com hata ({signal.symbol}): {err[:300]}")
         return False
