@@ -102,15 +102,42 @@ def _get_current_price(epic: str, headers: dict, direction: str) -> float:
     return float(snap.get("offer", 0)) if direction == "BUY" else float(snap.get("bid", 0))
 
 
-def calculate_size(sl_distance: float, balance: float, min_size: float = 0.01) -> float:
+# Enstrüman başına maksimum lot/unit — küçük lot modu
+MAX_SIZE_BY_EPIC = {
+    "GOLD":     0.1,    # 0.1 oz altın (yaklaşık $40 marjin)
+    "US100":    0.1,    # 0.1 lot Nasdaq
+    "US500":    0.1,    # 0.1 lot S&P
+    "EURUSD":   500,    # 500 unit forex
+    "GBPUSD":   500,    # 500 unit forex
+    "USDJPY":   500,    # 500 unit forex
+    "BITCOIN":  0.001,  # 0.001 BTC
+    "ETHEREUM": 0.01,   # 0.01 ETH
+}
+
+
+MIN_SIZE_BY_EPIC = {
+    "GOLD":     0.01,
+    "US100":    0.01,
+    "US500":    0.01,
+    "EURUSD":   100,
+    "GBPUSD":   100,
+    "USDJPY":   100,
+    "BITCOIN":  0.001,
+    "ETHEREUM": 0.01,
+}
+
+
+def calculate_size(sl_distance: float, balance: float, epic: str = "") -> float:
     """
-    Pozisyon boyutu = risk_usd / sl_distance (mesafe bazlı).
-    Max bakiyenin %5'i kadar risk.
+    Pozisyon boyutu = risk_usd / sl_distance.
+    MAX_SIZE_BY_EPIC ile üst, MIN_SIZE_BY_EPIC ile alt limit uygulanır.
     """
     if sl_distance <= 0:
-        return min_size
-    size = RISK_PER_TRADE_USD / sl_distance
-    size = max(round(size, 2), min_size)
+        return MIN_SIZE_BY_EPIC.get(epic, 100)
+    size     = RISK_PER_TRADE_USD / sl_distance
+    max_size = MAX_SIZE_BY_EPIC.get(epic, 500)
+    min_size = MIN_SIZE_BY_EPIC.get(epic, 100)
+    size     = max(min(round(size, 2), max_size), min_size)
     return size
 
 
@@ -145,7 +172,7 @@ def execute_signal(signal: Signal) -> bool:
             print(f"[CAPITAL] ⚠️ Fiyat kaydı %{slippage*100:.1f} — sinyal iptal ({signal.entry:.2f} → {market_price:.2f})")
             return False
 
-        size = calculate_size(sl_distance, balance)
+        size = calculate_size(sl_distance, balance, epic=epic)
 
         # Forex gibi küçük pip değerleri için 5 ondalık basamak şart
         # round(0.002, 2) = 0.0 → hata; round(0.002, 5) = 0.002 → OK
