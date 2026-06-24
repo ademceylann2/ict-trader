@@ -37,9 +37,19 @@ SYMBOL_MAP = {
 
 RISK_PER_TRADE_USD = float(os.environ.get("RISK_PER_TRADE_USD", "5.0"))
 
+# Session cache — her 25 dakikada bir yenile (token 30dk'da expire olur)
+_SESSION_CACHE: dict = {}
+_SESSION_TS: float = 0.0
+_SESSION_TTL = 25 * 60
+
 
 def _session_headers() -> dict:
-    """Capital.com oturumu aç, CST ve X-SECURITY-TOKEN döndür."""
+    """Capital.com oturumu aç (cache'li — 25dk TTL)."""
+    global _SESSION_CACHE, _SESSION_TS
+    import time as _time
+    if _SESSION_CACHE and (_time.time() - _SESSION_TS) < _SESSION_TTL:
+        return _SESSION_CACHE
+
     url = f"{BASE_URL}/api/v1/session"
     payload = {
         "identifier": CAPITAL_EMAIL,
@@ -52,12 +62,14 @@ def _session_headers() -> dict:
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=10)
     resp.raise_for_status()
-    return {
+    _SESSION_CACHE = {
         "X-CAP-API-KEY":    CAPITAL_API_KEY,
         "CST":              resp.headers.get("CST", ""),
         "X-SECURITY-TOKEN": resp.headers.get("X-SECURITY-TOKEN", ""),
         "Content-Type":     "application/json",
     }
+    _SESSION_TS = _time.time()
+    return _SESSION_CACHE
 
 
 def get_account_info() -> dict:
