@@ -2738,11 +2738,9 @@ class ICTAnalyzer:
                     stars = max(stars - 1, 1)
 
                 # ── ADX Rejim filtresi ───────────────────────────────────
-                # RANGE modunda trend-following sinyali verme
-                if adx_regime == "RANGE":
-                    # Sadece ORB varsa devam et, yoksa atla
-                    if orb_dir != "BULLISH":
-                        return None
+                # RANGE modunda düşük kalite trend-following sinyallerini blokla
+                if adx_regime == "RANGE" and orb_dir != "BULLISH" and stars < 5:
+                    return None
 
                 # ORB Bullish kırılış +2 yıldız
                 if orb_dir == "BULLISH":
@@ -3065,9 +3063,8 @@ class ICTAnalyzer:
                     stars = max(stars - 1, 1)
 
                 # ── ADX Rejim filtresi (SHORT) ───────────────────────────
-                if adx_regime == "RANGE":
-                    if orb_dir != "BEARISH":
-                        return None
+                if adx_regime == "RANGE" and orb_dir != "BEARISH" and stars < 5:
+                    return None
 
                 # ORB Bearish kırılış +2 yıldız
                 if orb_dir == "BEARISH":
