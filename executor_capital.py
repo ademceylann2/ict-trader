@@ -83,20 +83,21 @@ def get_market_info(epic: str, headers: dict) -> dict:
     return resp.json()
 
 
-def calculate_size(signal: Signal, balance: float, min_size: float = 0.1) -> float:
+def _get_current_price(epic: str, headers: dict, direction: str) -> float:
+    """Anlık bid (SELL) veya ask (BUY) fiyatı."""
+    resp = requests.get(f"{BASE_URL}/api/v1/markets/{epic}", headers=headers, timeout=10)
+    snap = resp.json().get("snapshot", {})
+    return float(snap.get("offer", 0)) if direction == "BUY" else float(snap.get("bid", 0))
+
+
+def calculate_size(sl_distance: float, balance: float, min_size: float = 0.01) -> float:
     """
-    Pozisyon boyutu = risk_usd / (entry - sl)
-    Capital.com 'size' cinsinden (lot/contract).
+    Pozisyon boyutu = risk_usd / sl_distance (mesafe bazlı).
+    Max bakiyenin %5'i kadar risk.
     """
-    price_risk = abs(signal.entry - signal.sl)
-    if price_risk <= 0:
+    if sl_distance <= 0:
         return min_size
-
-    size = RISK_PER_TRADE_USD / price_risk
-
-    # Max: bakiyenin %10'u
-    max_size = (balance * 0.10) / signal.entry
-    size = min(size, max_size)
+    size = RISK_PER_TRADE_USD / sl_distance
     size = max(round(size, 2), min_size)
     return size
 
@@ -112,20 +113,35 @@ def execute_signal(signal: Signal) -> bool:
         return False
 
     try:
-        headers = _session_headers()
-        acc     = get_account_info()
-        balance = float(acc["balance"])
-        size    = calculate_size(signal, balance)
-
+        headers   = _session_headers()
+        acc       = get_account_info()
+        balance   = float(acc["balance"])
         direction = "BUY" if signal.direction == "LONG" else "SELL"
 
+        # Anlık fiyatı al — sinyal entry'si stale olabilir
+        market_price = _get_current_price(epic, headers, direction)
+        if market_price <= 0:
+            market_price = signal.entry
+
+        # SL ve TP'yi mesafe (distance) olarak hesapla — fiyat bağımsız
+        sl_distance = abs(signal.entry - signal.sl)
+        tp_distance = abs(signal.tp1 - signal.entry)
+
+        # Eğer anlık fiyat entry'den çok uzaklaştıysa sinyali iptal et (>1% kayma)
+        slippage = abs(market_price - signal.entry) / signal.entry
+        if slippage > 0.01:
+            print(f"[CAPITAL] ⚠️ Fiyat kaydı %{slippage*100:.1f} — sinyal iptal ({signal.entry:.2f} → {market_price:.2f})")
+            return False
+
+        size = calculate_size(sl_distance, balance)
+
         order_body = {
-            "epic":      epic,
-            "direction": direction,
-            "size":      size,
+            "epic":           epic,
+            "direction":      direction,
+            "size":           size,
             "guaranteedStop": False,
-            "stopLevel":   round(signal.sl, 5),
-            "profitLevel": round(signal.tp1, 5),
+            "stopDistance":   round(sl_distance, 2),   # fiyat değil mesafe
+            "profitDistance": round(tp_distance, 2),   # fiyat değil mesafe
         }
 
         resp = requests.post(
@@ -143,22 +159,22 @@ def execute_signal(signal: Signal) -> bool:
 🎯 {epic} ({signal.symbol})
 {'🟢 LONG' if signal.direction=='LONG' else '🔴 SHORT'} | {signal.model} ★{signal.confidence}
 
-💰 Entry:  {signal.entry}
-🛑 SL:     {round(signal.sl, 5)}
-🎯 TP1:    {round(signal.tp1, 5)}
-📊 R:R     1:{signal.rr}
-📦 Size:   {size}
-💼 Bakiye: ${balance:.2f}
-🆔 Deal:   {deal_id}
+💰 Entry:    {market_price:.4f}
+🛑 SL dist:  {sl_distance:.2f} puan
+🎯 TP dist:  {tp_distance:.2f} puan
+📊 R:R       1:{signal.rr}
+📦 Size:     {size}
+💼 Bakiye:   ${balance:.2f}
+🆔 Deal:     {deal_id}
 """
         send_telegram(msg)
-        print(f"[CAPITAL] ✅ Pozisyon açıldı: {deal_id} | {epic} | {direction} {size}")
+        print(f"[CAPITAL] ✅ Pozisyon açıldı: {deal_id} | {epic} | {direction} {size} | SL:{sl_distance:.1f}pt")
         return True
 
     except requests.HTTPError as e:
-        err = e.response.text[:300] if e.response else str(e)
+        err = e.response.text[:400] if e.response else str(e)
         print(f"[CAPITAL] ❌ HTTP Hatası: {err}")
-        send_telegram(f"⚠️ Capital.com hata ({signal.symbol}): {err[:200]}")
+        send_telegram(f"⚠️ Capital.com hata ({signal.symbol}): {err[:300]}")
         return False
     except Exception as e:
         print(f"[CAPITAL] ❌ Hata: {e}")
