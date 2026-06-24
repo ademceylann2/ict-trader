@@ -1,0 +1,144 @@
+// @version=5
+// ICT Initial Balance Breakout — TradingView Webhook Alert Gönderici
+// Strateji: NY Session IB (13:00-16:00 UTC) kırılışında sinyal üretir
+// Alert'i: POST /webhook → Capital.com otomatik emir
+// ─────────────────────────────────────────────────────────────────────
+indicator("ICT IB Breakout Webhook", overlay=true, max_bars_back=500)
+
+// ── Parametreler ──────────────────────────────────────────────────────
+webhook_token   = input.string("ict-tv-2026",  "Webhook Token")
+ib_start_hour   = input.int(13, "IB Başlangıç (UTC saat)", minval=0, maxval=23)
+ib_end_hour     = input.int(16, "IB Bitiş (UTC saat)",     minval=1, maxval=23)
+sl_buffer_pct   = input.float(0.1, "SL Buffer %",          minval=0.01, step=0.01)
+rr_ratio        = input.float(2.0, "Risk/Ödül Oranı",      minval=1.0, step=0.1)
+symbol_epic     = input.string("GOLD", "Capital.com Epic (GOLD/EURUSD/US100)")
+min_stars       = input.int(4, "Min Yıldız (1-5)",         minval=1, maxval=5)
+adx_min         = input.int(20, "Min ADX (0=filtre kapalı)", minval=0, maxval=50)
+rsi_period      = input.int(14, "RSI Periyot")
+
+// ── ADX Hesabı ────────────────────────────────────────────────────────
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+
+// ── RSI ───────────────────────────────────────────────────────────────
+rsiVal = ta.rsi(close, rsi_period)
+
+// ── IB Hesabı (günlük bazda) ─────────────────────────────────────────
+// NY session başlangıç: 13:00 UTC, bitiş: 16:00 UTC
+in_ib_window  = (hour(time, "UTC") >= ib_start_hour) and (hour(time, "UTC") < ib_end_hour)
+
+// İlk IB mumu için tarih değişimini takip et
+var float ib_high = na
+var float ib_low  = na
+var bool  ib_set  = false
+var int   ib_day  = na
+
+current_day = dayofmonth(time)
+
+// Yeni gün başında IB sıfırla
+if current_day != ib_day
+    ib_high := na
+    ib_low  := na
+    ib_set  := false
+    ib_day  := current_day
+
+// IB penceresi içindeyken yüksek/düşük güncelle
+if in_ib_window
+    if na(ib_high) or high > ib_high
+        ib_high := high
+    if na(ib_low) or low < ib_low
+        ib_low := low
+    ib_set := true
+
+// IB penceresi kapandıktan sonra kırılışı ara
+past_ib_window = (hour(time, "UTC") >= ib_end_hour) and ib_set
+
+// ── Kırılış Tespiti ───────────────────────────────────────────────────
+breakout_long  = past_ib_window and ta.crossover(close, ib_high)
+breakout_short = past_ib_window and ta.crossunder(close, ib_low)
+
+// ── ADX Filtresi ─────────────────────────────────────────────────────
+adx_ok = adx_min == 0 or adxVal >= adx_min
+
+// ── Yıldız Hesabı ─────────────────────────────────────────────────────
+calc_stars_long() =>
+    s = 3  // Temel IB kırılış = 3 yıldız
+    if adxVal >= 25 and diPlus > diMinus
+        s := s + 1  // Güçlü trend
+    if rsiVal > 50 and rsiVal < 70
+        s := s + 1  // RSI momentum
+    math.min(s, 5)
+
+calc_stars_short() =>
+    s = 3
+    if adxVal >= 25 and diMinus > diPlus
+        s := s + 1
+    if rsiVal < 50 and rsiVal > 30
+        s := s + 1
+    math.min(s, 5)
+
+stars_long  = calc_stars_long()
+stars_short = calc_stars_short()
+
+// ── Sinyal Koşulları ─────────────────────────────────────────────────
+long_signal  = breakout_long  and adx_ok and stars_long  >= min_stars
+short_signal = breakout_short and adx_ok and stars_short >= min_stars
+
+// ── SL / TP Hesabı ───────────────────────────────────────────────────
+// LONG: SL = IB low - buffer, TP = entry + (entry-SL)*rr
+sl_buf = close * (sl_buffer_pct / 100)
+
+long_sl = ib_low  - sl_buf
+long_tp = close + (close - long_sl) * rr_ratio
+
+short_sl = ib_high + sl_buf
+short_tp = close - (short_sl - close) * rr_ratio
+
+// ── Çizimler ─────────────────────────────────────────────────────────
+plot(ib_set ? ib_high : na, "IB Yüksek", color=color.new(color.blue, 60), linewidth=1, style=plot.style_stepline)
+plot(ib_set ? ib_low  : na, "IB Düşük",  color=color.new(color.red,  60), linewidth=1, style=plot.style_stepline)
+
+plotshape(long_signal,  title="IB LONG",  location=location.belowbar, color=color.green, style=shape.triangleup,   size=size.normal, text="IB\nLONG")
+plotshape(short_signal, title="IB SHORT", location=location.abovebar, color=color.red,   style=shape.triangledown, size=size.normal, text="IB\nSHORT")
+
+bgcolor(in_ib_window ? color.new(color.blue, 95) : na, title="IB Penceresi")
+
+// ── Alert Mesajları (Webhook JSON) ────────────────────────────────────
+// Bu mesajı: Alerts → Create Alert → Condition: ICT IB Breakout Webhook
+// Webhook URL: https://dynamic-recreation-production-6b92.up.railway.app/webhook?token=ict-tv-2026
+
+long_msg = '{"token":"' + webhook_token + '","symbol":"' + symbol_epic +
+           '","action":"buy","price":' + str.tostring(close, "#.####") +
+           ',"sl":' + str.tostring(long_sl, "#.####") +
+           ',"tp":' + str.tostring(long_tp, "#.####") +
+           ',"strategy":"IB_BREAKOUT","stars":' + str.tostring(stars_long) + '}'
+
+short_msg = '{"token":"' + webhook_token + '","symbol":"' + symbol_epic +
+            '","action":"sell","price":' + str.tostring(close, "#.####") +
+            ',"sl":' + str.tostring(short_sl, "#.####") +
+            ',"tp":' + str.tostring(short_tp, "#.####") +
+            ',"strategy":"IB_BREAKOUT","stars":' + str.tostring(stars_short) + '}'
+
+alertcondition(long_signal,  title="IB LONG Kırılış",  message=long_msg)
+alertcondition(short_signal, title="IB SHORT Kırılış", message=short_msg)
+
+// ── Bilgi Tablosu ────────────────────────────────────────────────────
+if barstate.islast
+    var table info = table.new(position.top_right, 2, 6,
+        bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
+    table.cell(info, 0, 0, "IB Yüksek",  text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 0, ib_set ? str.tostring(ib_high, "#.##") : "—",
+        text_color=color.blue, text_size=size.small)
+    table.cell(info, 0, 1, "IB Düşük",   text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 1, ib_set ? str.tostring(ib_low, "#.##") : "—",
+        text_color=color.red,  text_size=size.small)
+    table.cell(info, 0, 2, "ADX",        text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 2, str.tostring(adxVal, "#.#"),
+        text_color=adxVal >= 25 ? color.green : color.yellow, text_size=size.small)
+    table.cell(info, 0, 3, "RSI",        text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 3, str.tostring(rsiVal, "#.#"),
+        text_color=rsiVal > 70 ? color.red : rsiVal < 30 ? color.green : color.white, text_size=size.small)
+    table.cell(info, 0, 4, "IB Durum",   text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 4, in_ib_window ? "Aktif" : ib_set ? "Hazır" : "Bekleniyor",
+        text_color=in_ib_window ? color.blue : ib_set ? color.green : color.gray, text_size=size.small)
+    table.cell(info, 0, 5, "Webhook",    text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 5, "railway.app", text_color=color.yellow, text_size=size.small)

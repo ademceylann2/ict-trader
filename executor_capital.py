@@ -142,8 +142,11 @@ def calculate_size(sl_distance: float, balance: float, epic: str = "") -> float:
 
 
 def execute_signal(signal: Signal) -> bool:
-    epic = SYMBOL_MAP.get(signal.symbol)
-    if not epic:
+    # Webhook'tan gelen sinyaller zaten epic formatında ("GOLD", "EURUSD" vb.)
+    # ICT analyzer'dan gelenler yfinance formatında ("GC=F", "EURUSD=X" vb.)
+    epic = SYMBOL_MAP.get(signal.symbol, signal.symbol)
+    known_epics = set(SYMBOL_MAP.values()) | {"GOLD","US100","US500","EURUSD","GBPUSD","USDJPY","BITCOIN","ETHEREUM"}
+    if epic not in known_epics:
         print(f"[CAPITAL] {signal.symbol} desteklenmiyor.")
         return False
 
