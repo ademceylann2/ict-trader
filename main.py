@@ -192,7 +192,10 @@ def main():
             for symbol in all_symbols:
                 analyzer = ICTAnalyzer(symbol)
                 print(f"  Taranıyor: {symbol}")
-                scan_symbol(symbol, data, analyzer, kill_zone, gold_news=gold_news)
+                try:
+                    scan_symbol(symbol, data, analyzer, kill_zone, gold_news=gold_news)
+                except Exception as e:
+                    print(f"  [{symbol}] HATA: {e}")
         else:
             print("  (Kill Zone dışı — sadece haber takibi)")
 

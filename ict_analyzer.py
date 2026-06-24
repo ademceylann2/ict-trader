@@ -696,7 +696,10 @@ class ICTAnalyzer:
     # ══════════════════════════════════════════════════════════════════════
     def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> dict:
         """ADX hesapla. Rejim: TREND (>25) / WEAK (20-25) / RANGE (<20)."""
-        if len(df) < period + 5:
+        try:
+            if len(df) < period + 5:
+                return {"adx": 0, "regime": "UNKNOWN", "+di": 0, "-di": 0}
+        except Exception:
             return {"adx": 0, "regime": "UNKNOWN", "+di": 0, "-di": 0}
 
         high  = df["High"].values
@@ -755,10 +758,13 @@ class ICTAnalyzer:
         et = pytz.timezone("America/New_York")
         orb_candles = []
 
-        for ts, row in df.iterrows():
-            t = ts.astimezone(et)
-            if t.hour == 9 and t.minute in (30, 31):
-                orb_candles.append(row)
+        try:
+            for ts, row in df.iterrows():
+                t = ts.tz_localize("UTC").astimezone(et) if ts.tzinfo is None else ts.astimezone(et)
+                if t.hour == 9 and t.minute in (30, 31):
+                    orb_candles.append(row)
+        except Exception:
+            return {"found": False}
 
         if not orb_candles:
             return {"found": False}
@@ -767,7 +773,8 @@ class ICTAnalyzer:
         orb_low  = min(c["Low"]  for c in orb_candles)
         orb_size = orb_high - orb_low
         current  = df["Close"].iloc[-1]
-        now_et   = df.index[-1].astimezone(et)
+        last_ts  = df.index[-1]
+        now_et   = (last_ts.tz_localize("UTC") if last_ts.tzinfo is None else last_ts).astimezone(et)
 
         # Sadece 9:33-10:30 ET arası geçerli (giriş penceresi)
         if not (9 <= now_et.hour <= 10):
@@ -797,7 +804,10 @@ class ICTAnalyzer:
         Yaklaşık Volume Profile. POC = en fazla hacmin toplandığı fiyat.
         VAH/VAL = toplam hacmin %70'ini kapsayan üst/alt sınır.
         """
-        if df.empty or "Volume" not in df.columns or df["Volume"].sum() == 0:
+        try:
+            if df.empty or "Volume" not in df.columns or df["Volume"].sum() == 0:
+                return {}
+        except Exception:
             return {}
 
         import numpy as np
@@ -2317,9 +2327,18 @@ class ICTAnalyzer:
             smt = self.detect_smt_divergence(df_mtf, df_corr)
 
         # ── Hibrit Göstergeler: ADX + ORB + Volume Profile ───────────────
-        adx_data = self.calculate_adx(df_htf)
-        orb_data = self.detect_orb(df_mtf)
-        vp_data  = self.calculate_volume_profile(df_htf)
+        try:
+            adx_data = self.calculate_adx(df_htf)
+        except Exception:
+            adx_data = {"adx": 0, "regime": "UNKNOWN", "+di": 0, "-di": 0}
+        try:
+            orb_data = self.detect_orb(df_mtf)
+        except Exception:
+            orb_data = {"found": False}
+        try:
+            vp_data = self.calculate_volume_profile(df_htf)
+        except Exception:
+            vp_data = {}
 
         adx_regime = adx_data.get("regime", "UNKNOWN")
         orb_dir    = orb_data.get("direction", "NONE") if orb_data.get("found") else "NONE"

@@ -215,7 +215,7 @@ def get_open_positions() -> list:
                 "epic":       mkt["epic"],
                 "direction":  pos["direction"],
                 "size":       pos["size"],
-                "open_price": pos["openLevel"],
+                "open_price": pos.get("level", pos.get("openLevel", 0)),
                 "pl":         pos.get("upl", 0),
             })
         return result
