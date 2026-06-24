@@ -384,6 +384,19 @@ class ICTAnalyzer:
     # ══════════════════════════════════════════════════════════════════════
     # IPDA — Interbank Price Delivery Algorithm (20/40/60 gün)
     # ══════════════════════════════════════════════════════════════════════
+    def _min_sl_distance(self, price: float) -> float:
+        """Sembol tipine göre minimum SL mesafesi. Gürültünün altında SL koyma."""
+        sym = self.symbol
+        if sym in ("GC=F", "GOLD"):          # Altın: min $20
+            return 20.0
+        if sym in ("NQ=F", "US100"):         # Nasdaq: min 50 puan
+            return 50.0
+        if sym in ("ES=F", "US500"):         # S&P: min 20 puan
+            return 20.0
+        if "JPY" in sym:                      # JPY çiftleri: min 0.30 (30 pip)
+            return 0.30
+        return price * 0.0015                 # Diğer Forex: min %0.15 (15 pip benzeri)
+
     def ipda_levels(self, df_daily: pd.DataFrame) -> dict:
         levels = {}
         for d in [20, 40, 60]:
@@ -2075,6 +2088,22 @@ class ICTAnalyzer:
         liq       = self.find_liquidity(df_htf)
         current   = df_mtf["Close"].iloc[-1]
 
+        # ── Daily trend filtresi (Bug Fix #2) ────────────────────────────────
+        # 1h HTF bias kısa vadeli yapıyı görür ama günlük trend aksi yönde ise
+        # kurulum zayıf. SMA50 vs SMA200 filtresi: trend ile çalış, karşı gitme.
+        daily_trend = "NEUTRAL"
+        if df_daily is not None and not df_daily.empty and len(df_daily) >= 30:
+            sma50  = df_daily["Close"].tail(50).mean()
+            sma200 = df_daily["Close"].tail(200).mean() if len(df_daily) >= 200 else df_daily["Close"].mean()
+            daily_trend = "UP" if sma50 > sma200 else "DOWN"
+
+        # Günlük trend aşağıyken LONG açma
+        if daily_trend == "DOWN" and bias in ("BULLISH", "CHOCH_BULLISH"):
+            return None
+        # Günlük trend yukarıyken SHORT açma
+        if daily_trend == "UP" and bias in ("BEARISH", "CHOCH_BEARISH"):
+            return None
+
         # MTF analiz setleri — BISI/SIBI etiketli FVG (BUG FIX)
         fvgs       = self.find_fvg_classified(df_mtf)
         ifvgs      = self.find_ifvg(df_mtf)
@@ -2539,6 +2568,11 @@ class ICTAnalyzer:
                     confs.append(f"⚠️ {weekly_prof['day']}: {weekly_prof['note']}")
                     stars = max(stars - 1, 1)
 
+                # Bug Fix #3 — Min SL mesafesi: Gold $20, Forex 15 pip, Endeks 50 puan
+                min_sl_dist = self._min_sl_distance(current)
+                if (current - sl) < min_sl_dist:
+                    sl = round(current - min_sl_dist, 5)
+
                 risk   = current - sl
                 reward = tp1 - current
                 rr     = round(reward / risk, 2) if risk > 0 else 0
@@ -2835,6 +2869,11 @@ class ICTAnalyzer:
                 if low_prob_day:
                     confs.append(f"⚠️ {weekly_prof['day']}: {weekly_prof['note']}")
                     stars = max(stars - 1, 1)
+
+                # Bug Fix #3 — Min SL mesafesi
+                min_sl_dist = self._min_sl_distance(current)
+                if (sl - current) < min_sl_dist:
+                    sl = round(current + min_sl_dist, 5)
 
                 risk   = sl - current
                 reward = current - tp1
