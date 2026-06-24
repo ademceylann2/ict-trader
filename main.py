@@ -43,8 +43,15 @@ SMT_PAIRS = {
 }
 
 
+GOLD_SYMBOL = "GC=F"
+
 def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
-                kill_zone: str) -> None:
+                kill_zone: str, gold_news: bool = False) -> None:
+    # Gold haber penceresi kontrolü
+    if symbol == GOLD_SYMBOL and gold_news:
+        print(f"  [{symbol}] USD haberi penceresi — Gold atlanıyor")
+        return
+
     df_htf   = data.get_ohlcv(symbol, interval=TIMEFRAMES["htf"], period="10d")
     df_mtf   = data.get_ohlcv(symbol, interval=TIMEFRAMES["mtf"], period="3d")
     df_daily = data.get_ohlcv(symbol, interval="1d", period="90d")
@@ -61,6 +68,11 @@ def scan_symbol(symbol: str, data: MarketData, analyzer: ICTAnalyzer,
     # Endeksler sadece London'da iyi
     if symbol in INDEX_SYMBOLS and kill_zone in SKIP_KZ_FOR_INDEX:
         print(f"  [{symbol}] {kill_zone} endeks için atlanıyor (backtest filtresi)")
+        return
+
+    # Gold Asia session kötü — atla
+    if symbol == GOLD_SYMBOL and kill_zone == "asia":
+        print(f"  [{symbol}] Asia session Gold için atlanıyor (backtest: %0 WR)")
         return
 
     # SMT için korelasyonlu çift
@@ -158,12 +170,17 @@ def main():
 
         in_news, news_event = news.is_news_window(minutes_before=30, minutes_after=30)
         if in_news:
-            print(f"  ⚠️  HABER PENCERESİ: {news_event} — sinyal atlanıyor")
+            print(f"  ⚠️  HABER PENCERESİ: {news_event} — tüm sinyaller atlanıyor")
             send_news_alert({"currency": news_event.split("-")[0].strip(),
                              "event": news_event, "time": "ŞIMDI",
                              "minutes_away": 0})
             time.sleep(SCAN_INTERVAL)
             continue
+
+        # Gold için ek filtre: USD haberi 30dk öncesi/sonrası GOLD işlemi yasak
+        gold_news, gold_event = news.is_gold_news_window(minutes_before=30, minutes_after=60)
+        if gold_news:
+            print(f"  ⚠️  ALTIN HABER PENCERESİ: {gold_event} — GC=F atlanıyor")
 
         upcoming = news.get_upcoming_events(hours=2)
         for ev in upcoming:
@@ -175,7 +192,7 @@ def main():
             for symbol in all_symbols:
                 analyzer = ICTAnalyzer(symbol)
                 print(f"  Taranıyor: {symbol}")
-                scan_symbol(symbol, data, analyzer, kill_zone)
+                scan_symbol(symbol, data, analyzer, kill_zone, gold_news=gold_news)
         else:
             print("  (Kill Zone dışı — sadece haber takibi)")
 
