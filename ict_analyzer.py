@@ -690,6 +690,157 @@ class ICTAnalyzer:
         return ""
 
     # ══════════════════════════════════════════════════════════════════════
+    # ADX — Trend/Range Rejim Tespiti
+    # ADX > 25 → trend modu (trend following çalışır)
+    # ADX < 20 → range modu (mean reversion + ORB çalışır)
+    # ══════════════════════════════════════════════════════════════════════
+    def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> dict:
+        """ADX hesapla. Rejim: TREND (>25) / WEAK (20-25) / RANGE (<20)."""
+        if len(df) < period + 5:
+            return {"adx": 0, "regime": "UNKNOWN", "+di": 0, "-di": 0}
+
+        high  = df["High"].values
+        low   = df["Low"].values
+        close = df["Close"].values
+        n     = len(df)
+
+        tr_list, pdm_list, ndm_list = [], [], []
+        for i in range(1, n):
+            tr  = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            pdm = max(high[i] - high[i-1], 0) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
+            ndm = max(low[i-1] - low[i], 0) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
+            tr_list.append(tr); pdm_list.append(pdm); ndm_list.append(ndm)
+
+        import numpy as np
+        def wilder_smooth(arr, p):
+            out = [sum(arr[:p])]
+            for v in arr[p:]:
+                out.append(out[-1] - out[-1]/p + v)
+            return out
+
+        atr14  = wilder_smooth(tr_list,  period)
+        pdm14  = wilder_smooth(pdm_list, period)
+        ndm14  = wilder_smooth(ndm_list, period)
+
+        dx_list = []
+        pdi_list, ndi_list = [], []
+        for a, p, nd in zip(atr14, pdm14, ndm14):
+            if a == 0: continue
+            pdi = 100 * p / a
+            ndi = 100 * nd / a
+            pdi_list.append(pdi); ndi_list.append(ndi)
+            dx  = 100 * abs(pdi - ndi) / (pdi + ndi + 1e-9)
+            dx_list.append(dx)
+
+        if len(dx_list) < period:
+            return {"adx": 0, "regime": "UNKNOWN", "+di": 0, "-di": 0}
+
+        adx = sum(dx_list[-period:]) / period
+        pdi_last = pdi_list[-1] if pdi_list else 0
+        ndi_last = ndi_list[-1] if ndi_list else 0
+
+        regime = "TREND" if adx > 25 else ("WEAK" if adx > 20 else "RANGE")
+        return {"adx": round(adx, 1), "regime": regime, "+di": round(pdi_last, 1), "-di": round(ndi_last, 1)}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ORB — Opening Range Breakout (NY 9:30-9:32 ET)
+    # Profit Factor 2.51 kanıtlanmış (tradethatswing.com)
+    # ══════════════════════════════════════════════════════════════════════
+    def detect_orb(self, df: pd.DataFrame) -> dict:
+        """
+        NY 9:30-9:32 ET arası oluşan range. Kırılış = güçlü sinyal.
+        Bullish ORB: close > orb_high
+        Bearish ORB: close < orb_low
+        """
+        et = pytz.timezone("America/New_York")
+        orb_candles = []
+
+        for ts, row in df.iterrows():
+            t = ts.astimezone(et)
+            if t.hour == 9 and t.minute in (30, 31):
+                orb_candles.append(row)
+
+        if not orb_candles:
+            return {"found": False}
+
+        orb_high = max(c["High"] for c in orb_candles)
+        orb_low  = min(c["Low"]  for c in orb_candles)
+        orb_size = orb_high - orb_low
+        current  = df["Close"].iloc[-1]
+        now_et   = df.index[-1].astimezone(et)
+
+        # Sadece 9:33-10:30 ET arası geçerli (giriş penceresi)
+        if not (9 <= now_et.hour <= 10):
+            return {"found": False, "orb_high": orb_high, "orb_low": orb_low}
+
+        breakout_dir = None
+        if current > orb_high:
+            breakout_dir = "BULLISH"
+        elif current < orb_low:
+            breakout_dir = "BEARISH"
+
+        return {
+            "found":      breakout_dir is not None,
+            "direction":  breakout_dir,
+            "orb_high":   round(orb_high, 4),
+            "orb_low":    round(orb_low, 4),
+            "orb_size":   round(orb_size, 4),
+            "desc":       f"ORB Kırılış: {breakout_dir} (range={orb_size:.2f})" if breakout_dir else "ORB bekleniyor",
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # VOLUME PROFILE — POC / VAH / VAL (yaklaşık)
+    # yfinance tick verisi yok → fiyat-hacim histogram ile yaklaşım
+    # ══════════════════════════════════════════════════════════════════════
+    def calculate_volume_profile(self, df: pd.DataFrame, bins: int = 30) -> dict:
+        """
+        Yaklaşık Volume Profile. POC = en fazla hacmin toplandığı fiyat.
+        VAH/VAL = toplam hacmin %70'ini kapsayan üst/alt sınır.
+        """
+        if df.empty or "Volume" not in df.columns or df["Volume"].sum() == 0:
+            return {}
+
+        import numpy as np
+        price_min = df["Low"].min()
+        price_max = df["High"].max()
+        bin_size  = (price_max - price_min) / bins
+        if bin_size == 0:
+            return {}
+
+        # Her mum için orta fiyat × hacim
+        vol_profile = np.zeros(bins)
+        for _, row in df.iterrows():
+            mid   = (row["High"] + row["Low"]) / 2
+            idx   = int((mid - price_min) / bin_size)
+            idx   = min(idx, bins - 1)
+            vol_profile[idx] += row["Volume"]
+
+        poc_idx  = int(np.argmax(vol_profile))
+        poc_price = round(price_min + (poc_idx + 0.5) * bin_size, 4)
+
+        # VAH/VAL — %70 hacim
+        total_vol = vol_profile.sum()
+        target    = total_vol * 0.70
+        # POC'tan dışa doğru genişlet
+        lo_idx = hi_idx = poc_idx
+        acc = vol_profile[poc_idx]
+        while acc < target and (lo_idx > 0 or hi_idx < bins - 1):
+            lo_next = vol_profile[lo_idx - 1] if lo_idx > 0 else 0
+            hi_next = vol_profile[hi_idx + 1] if hi_idx < bins - 1 else 0
+            if lo_next >= hi_next and lo_idx > 0:
+                lo_idx -= 1; acc += lo_next
+            elif hi_idx < bins - 1:
+                hi_idx += 1; acc += hi_next
+            else:
+                break
+
+        vah = round(price_min + (hi_idx + 1) * bin_size, 4)
+        val = round(price_min + lo_idx * bin_size, 4)
+
+        return {"poc": poc_price, "vah": vah, "val": val,
+                "desc": f"VP POC={poc_price} VAH={vah} VAL={val}"}
+
+    # ══════════════════════════════════════════════════════════════════════
     # NDOG / NWOG — Günlük & Haftalık Açılış Boşlukları
     # NDOG: 17:00-18:00 NY arası boşluk (her gün)
     # NWOG: Cuma 17:00 - Pazartesi 18:00 NY arası boşluk
@@ -2165,6 +2316,17 @@ class ICTAnalyzer:
         if df_corr is not None:
             smt = self.detect_smt_divergence(df_mtf, df_corr)
 
+        # ── Hibrit Göstergeler: ADX + ORB + Volume Profile ───────────────
+        adx_data = self.calculate_adx(df_htf)
+        orb_data = self.detect_orb(df_mtf)
+        vp_data  = self.calculate_volume_profile(df_htf)
+
+        adx_regime = adx_data.get("regime", "UNKNOWN")
+        orb_dir    = orb_data.get("direction", "NONE") if orb_data.get("found") else "NONE"
+        vp_poc     = vp_data.get("poc", 0)
+        vp_vah     = vp_data.get("vah", 0)
+        vp_val     = vp_data.get("val", 0)
+
         # ── Cuma / Pazartesi düşük olasılık (Weekly Profile) ─────────────
         low_prob_day = not weekly_prof.get("trade", True)  # Cuma & Pazartesi
 
@@ -2269,6 +2431,13 @@ class ICTAnalyzer:
         # ERL/IRL Faz
         if erl_irl.get("phase") not in ("UNKNOWN", "RANGING", None):
             base.append(f"ERL/IRL: {erl_irl['desc']}")
+
+        # ADX / ORB / Volume Profile bağlamı
+        base.append(f"ADX Rejim: {adx_regime} (ADX={round(adx_data.get('adx',0),1)})")
+        if orb_data.get("found"):
+            base.append(f"ORB: {orb_dir} kırılış ({orb_data.get('desc','')})")
+        if vp_poc > 0:
+            base.append(f"VP POC: {round(vp_poc,4)} | VAH: {round(vp_vah,4)} | VAL: {round(vp_val,4)}")
 
         # Breakaway Gap hedefleri
         for bg in breakaway_gaps[:2]:
@@ -2567,6 +2736,31 @@ class ICTAnalyzer:
                 if low_prob_day:
                     confs.append(f"⚠️ {weekly_prof['day']}: {weekly_prof['note']}")
                     stars = max(stars - 1, 1)
+
+                # ── ADX Rejim filtresi ───────────────────────────────────
+                # RANGE modunda trend-following sinyali verme
+                if adx_regime == "RANGE":
+                    # Sadece ORB varsa devam et, yoksa atla
+                    if orb_dir != "BULLISH":
+                        return None
+
+                # ORB Bullish kırılış +2 yıldız
+                if orb_dir == "BULLISH":
+                    stars = min(stars + 2, 5)
+                    confs.append(f"ORB Bullish kırılış ✓ +2★")
+
+                # ADX TREND modu + DI+ > DI- → trend onayı +1 yıldız
+                if adx_regime == "TREND" and adx_data.get("+di", 0) > adx_data.get("-di", 0):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"ADX Trend Onayı: +DI>{round(adx_data.get('+di',0),1)} -DI>{round(adx_data.get('-di',0),1)} ✓")
+
+                # Volume Profile POC destek bölgesi — fiyat VAL altındaysa destek teyidi
+                if vp_poc > 0 and current <= vp_val * 1.002:
+                    stars = min(stars + 1, 5)
+                    confs.append(f"VP POC Destek: fiyat VAL altında ({round(current,4)} < {round(vp_val,4)}) ✓")
+                elif vp_poc > 0 and abs(current - vp_poc) / vp_poc < 0.003:
+                    stars = min(stars + 1, 5)
+                    confs.append(f"VP POC Yakın: {round(vp_poc,4)} destek ✓")
 
                 # Bug Fix #3 — Min SL mesafesi: Gold $20, Forex 15 pip, Endeks 50 puan
                 min_sl_dist = self._min_sl_distance(current)
@@ -2869,6 +3063,29 @@ class ICTAnalyzer:
                 if low_prob_day:
                     confs.append(f"⚠️ {weekly_prof['day']}: {weekly_prof['note']}")
                     stars = max(stars - 1, 1)
+
+                # ── ADX Rejim filtresi (SHORT) ───────────────────────────
+                if adx_regime == "RANGE":
+                    if orb_dir != "BEARISH":
+                        return None
+
+                # ORB Bearish kırılış +2 yıldız
+                if orb_dir == "BEARISH":
+                    stars = min(stars + 2, 5)
+                    confs.append(f"ORB Bearish kırılış ✓ +2★")
+
+                # ADX TREND modu + DI- > DI+ → trend onayı +1 yıldız
+                if adx_regime == "TREND" and adx_data.get("-di", 0) > adx_data.get("+di", 0):
+                    stars = min(stars + 1, 5)
+                    confs.append(f"ADX Trend Onayı: -DI>{round(adx_data.get('-di',0),1)} +DI>{round(adx_data.get('+di',0),1)} ✓")
+
+                # Volume Profile POC direnç bölgesi — fiyat VAH üstündeyse direnç teyidi
+                if vp_poc > 0 and current >= vp_vah * 0.998:
+                    stars = min(stars + 1, 5)
+                    confs.append(f"VP POC Direnç: fiyat VAH üstünde ({round(current,4)} > {round(vp_vah,4)}) ✓")
+                elif vp_poc > 0 and abs(current - vp_poc) / vp_poc < 0.003:
+                    stars = min(stars + 1, 5)
+                    confs.append(f"VP POC Yakın: {round(vp_poc,4)} direnç ✓")
 
                 # Bug Fix #3 — Min SL mesafesi
                 min_sl_dist = self._min_sl_distance(current)
