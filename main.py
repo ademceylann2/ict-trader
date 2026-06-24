@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
 ICT Trader v3 — Inner Circle Trader tam metodoloji botu.
+TradingView webhook entegrasyonu: POST /webhook
 """
 
+import os
 import time
 import sys
+import threading
 from datetime import datetime
 
 from config import SYMBOLS, TIMEFRAMES
@@ -127,6 +130,13 @@ def main():
     print("=" * 50)
     print("  ICT TRADER v3 BAŞLADI")
     print("=" * 50)
+
+    # TradingView webhook sunucusunu ayrı thread'de başlat
+    port = int(os.environ.get("PORT", 5000))
+    from webhook import run_webhook
+    wh_thread = threading.Thread(target=run_webhook, args=(port,), daemon=True)
+    wh_thread.start()
+    print(f"  Webhook sunucu: port {port} aktif (POST /webhook)")
 
     data = MarketData()
     news = NewsMonitor(high_impact_only=True)
